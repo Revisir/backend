@@ -1,0 +1,53 @@
+method: post
+url: /topics
+parameters:
+  header:
+    - name: Content-Type
+      value: application/json
+requestBody:
+  type: application/json
+  data: "{\r
+
+    \  \"topicName\": \"Newton First lkaw\",\r
+
+    \  \"subjectName\": \"Physics\",\r
+
+    \  \"description\": \"Wave functions and Schrödinger equation\",\r
+
+    \  \"dateStudied\": \"2026-01-31T04:00:00Z\",\r
+
+    \  \"files\": [\r
+
+    \    {\r
+
+    \      \"fileName\": \"lecture-notes.pdf\",\r
+
+    \      \"size\": 2048576,\r
+
+    \      \"contentType\": \"application/pdf\"\r
+
+    \    },\r
+
+    \    {\r
+
+    \      \"fileName\": \"diagram.png\",\r
+
+    \      \"size\": 512000,\r
+
+    \      \"contentType\": \"image/png\"\r
+
+    \    },\r
+
+    \    {\r
+
+    \      \"fileName\": \"summary.txt\",\r
+
+    \      \"size\": 8192,\r
+
+    \      \"contentType\": \"text/plain\"\r
+
+    \    }\r
+
+    \  ]\r
+
+    }"

@@ -1,0 +1,11 @@
+method: get
+url: /topics?page=1&limit=10
+parameters:
+  query:
+    - name: page
+      value: "1"
+    - name: limit
+      value: "10"
+    - name: subject
+      value: Mathematics
+      disabled: true
