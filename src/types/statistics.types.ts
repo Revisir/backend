@@ -3,5 +3,12 @@ export interface StatisticsResponse {
   dueToday: number;
   revisedThisWeek: number;
   revisedThisMonth: number;
-  upcomingRevisions: { date: string; count: number }[];
+  upcomingRevisions: [string, number][];
+  perSubject: object;
+  revisionPerDay: { max: number; dataArr: [string, number][] };
+}
+
+export interface DuePerSubject {
+  name: string;
+  children: { name: string; value: number }[];
 }

@@ -35,6 +35,7 @@ export async function createTopic(req: Request, res: Response): Promise<void> {
     }
 
     const { topicName, subjectName, description, dateStudied, files } = validation.data;
+    console.log("Topic create details : ", validation.data);
     const dateStudiedParsed = new Date(dateStudied);
 
     const sm2Result = calculateNextReview({
@@ -60,24 +61,25 @@ export async function createTopic(req: Request, res: Response): Promise<void> {
 
     await topic.save();
 
-    const uploadUrls = files?.map((file) => ({
-      fileName: file.fileName,
-      uploadUrl: generatePresignedUploadUrl(
-        req.userId!,
-        topic._id.toString(),
-        file.fileName,
-        file.contentType
-      ),
-    })) || [];
+    const uploadUrls =
+      files?.map((file) => ({
+        fileName: file.fileName,
+        uploadUrl: generatePresignedUploadUrl(req.userId!, topic._id.toString(), file.fileName, file.contentType),
+      })) || [];
 
     const response: CreateTopicResponse = {
       topicId: topic._id.toString(),
+      topicName: topic.topicName,
+      subjectName: topic.subjectName,
+      description: topic.description,
+      dateStudied: topic.dateStudied.toISOString(),
       revisionDate: topic.revisionDate.toISOString(),
+      isDue: topic.isDue,
       uploadUrls: await Promise.all(
         uploadUrls.map(async (u) => ({
           fileName: u.fileName,
           uploadUrl: await u.uploadUrl,
-        }))
+        })),
       ),
     };
 

@@ -8,6 +8,7 @@ import { GetTopicsResponse } from "$types/topic.types";
 import { ErrorResponse } from "$types/common.types";
 import { getTopicsQuerySchema, topicIdParamSchema } from "@/schemas";
 import { z } from "zod";
+import { DateTime } from "luxon";
 
 const markRevisedSchema = z.object({
   userQuality: z.number().min(1).max(5),
@@ -57,7 +58,7 @@ export async function getTopics(req: Request, res: Response): Promise<void> {
 
     const skip = (pageNum - 1) * limitNum;
 
-    const [topics, total] = await Promise.all([Topic.find(filter).sort({ createdAt: -1 }).select("topicName subjectName description dateStudied revisionDate isDue").skip(skip).limit(limitNum).lean(), Topic.countDocuments(filter)]);
+    const [topics, total] = await Promise.all([Topic.find(filter).sort({ createdAt: -1 }).select("topicName subjectName description dateStudied revisionDate lastRevised").skip(skip).limit(limitNum).lean(), Topic.countDocuments(filter)]);
 
     const response: GetTopicsResponse = {
       topics,
@@ -130,12 +131,15 @@ export async function getTopicById(req: Request, res: Response): Promise<void> {
  */
 export async function getDueTopics(req: Request, res: Response): Promise<void> {
   try {
-    const currentDate = new Date();
-
+    const timeZone = req.headers["X-Local-TimeZone"]?.[0] ?? "Asia/Calcutta";
+    const currentDate = DateTime.now().setZone(timeZone);
+    const tomorrowDayStart = currentDate.plus({ day: 1 }).startOf("day");
+    const todayDayStart = currentDate.startOf("day");
+    const todayDayend = currentDate.endOf("day");
     const dueTopics = await Topic.find({
       userId: req.userId,
-      revisionDate: { $lte: currentDate },
-    })
+      $or: [{ revisionDate: { $lte: tomorrowDayStart } }, { lastRevised: { $lte: todayDayend, $gte: todayDayStart } }],
+    } as any)
       .sort({ revisionDate: 1 })
       .lean();
 
@@ -387,15 +391,15 @@ export async function markTopicRevised(req: Request, res: Response): Promise<voi
       return;
     }
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    const today = DateTime.now().toUTC();
+    const todayJs = today.toJSDate();
+    const todayDayStart = today.startOf("day").toJSDate();
+    const todayDayEnd = today.endOf("day").toJSDate();
 
     const todayRecord = await RevisionRecord.findOne({
       topicId: id,
       userId: req.userId,
-      revisionDate: { $gte: today, $lt: tomorrow },
+      revisionDate: { $gte: todayDayStart, $lt: todayDayEnd },
     });
 
     if (todayRecord) {
@@ -419,7 +423,7 @@ export async function markTopicRevised(req: Request, res: Response): Promise<voi
 
       await topic.save();
 
-      res.status(200).json({ success: true, unrevised: true });
+      res.status(200).json({ success: true, unrevised: true, nextRevisionDate: topic.revisionDate, lastRevised: topic.lastRevised });
       return;
     }
 
@@ -437,7 +441,7 @@ export async function markTopicRevised(req: Request, res: Response): Promise<voi
     await RevisionRecord.create({
       userId: req.userId,
       topicId: id,
-      revisionDate: new Date(),
+      revisionDate: todayJs,
       userQuality,
       llmQuality: llmQuality ?? userQuality,
       finalQuality,
@@ -450,12 +454,13 @@ export async function markTopicRevised(req: Request, res: Response): Promise<voi
     topic.interval = result.interval;
     topic.revisionDate = result.nextRevisionDate;
     topic.repetitionNumber = result.repetitionNumber;
-    topic.lastRevised = new Date();
+    topic.lastRevised = todayJs;
     await topic.save();
 
     res.status(200).json({
       success: true,
       nextRevisionDate: result.nextRevisionDate.toISOString(),
+      lastRevised: todayJs,
     });
   } catch (error) {
     console.error("Error marking topic as revised:", error);

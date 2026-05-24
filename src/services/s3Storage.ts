@@ -4,7 +4,6 @@ import { s3Client, S3_BUCKET_NAME } from "../config/s3";
 import * as Minio from "minio";
 
 const useMinio = process.env.BUCKET_TYPE === "minio";
-
 // MinIO client for presigned URLs (only in development)
 const minioClient = useMinio
   ? new Minio.Client({
@@ -321,6 +320,7 @@ export async function deleteTopicFiles(userId: string, topicId: string): Promise
   const prefix = `${userId}/${topicId}/`;
 
   try {
+    console.log("Deleting from Some bucket", useMinio);
     if (!useMinio) {
       const listCommand = new ListObjectsV2Command({
         Bucket: S3_BUCKET_NAME,
@@ -342,6 +342,7 @@ export async function deleteTopicFiles(userId: string, topicId: string): Promise
       await s3Client.send(deleteCommand);
       console.log(`Deleted ${listResponse.Contents.length} files for topic: ${prefix}`);
     } else {
+      console.log("Deleting from Minio");
       const objectsStream = minioClient!.listObjects(S3_BUCKET_NAME, prefix, true);
       const objectsList: string[] = [];
 

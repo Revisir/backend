@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { getTopics, getTopicById, getDueTopics, getTopicHistory, generateTopicMindMap, getTopicMindMap, markTopicRevised, updateTopic, deleteTopicFile, uploadTopicFiles, deleteTopic } from "@controllers/topicController";
-import { upload } from "@middleware/upload";
+// import { upload } from "@middleware/upload";
 import { createTopic } from "@controllers/createTopicController";
 const router = Router();
 
@@ -37,7 +37,7 @@ router.get("/", getTopics);
  */
 router.post(
   "/",
-  upload.array("files", 10), // Accept up to 10 files with field name 'files'
+  // upload.array("files", 10), // Accept up to 10 files with field name 'files'
   createTopic,
 );
 /**
