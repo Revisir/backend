@@ -1,0 +1,35 @@
+method: post
+url: /topics/69e10733568b2d6216829efc/files
+parameters:
+  header:
+    - name: Content-Type
+      value: application/json
+requestBody:
+  type: application/json
+  data: "{\r
+
+    \  \"files\": [\r
+
+    \    {\r
+
+    \      \"fileName\": \"lecture-notes.pdf\",\r
+
+    \      \"size\": 2048576,\r
+
+    \      \"contentType\": \"application/pdf\"\r
+
+    \    },\r
+
+    \    {\r
+
+    \      \"fileName\": \"diagram.png\",\r
+
+    \      \"size\": 512000,\r
+
+    \      \"contentType\": \"image/png\"\r
+
+    \    }\r
+
+    \  ]\r
+
+    }"

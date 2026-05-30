@@ -1,6 +1,7 @@
-import { ITopic } from '@models/Topic';
-import { getExtractedContent } from './s3Storage';
-import { getLLMClient } from './llmClient';
+import { ITopic } from '@models/Topic.js';
+import { getExtractedContent } from './s3Storage.js';
+import { getLLMClient } from './llmClient.js';
+import { PROMPTS } from '@config/prompts.js';
 
 /**
  * Mind Map Generator
@@ -35,31 +36,7 @@ export async function buildMindMapPrompt(topic: ITopic): Promise<string> {
     ? extractedContents.join('\n')
     : '[No study materials attached]';
 
-  // Build the mind map generation prompt
-  const mindMapPrompt = `Generate a Mermaid mind map for the following topic:
-
-Topic: ${topic.topicName}
-Subject: ${topic.subjectName}
-Description: ${topic.description || '[No description provided]'}
-
-Study Materials:
-${studyMaterials}
-
-Create a comprehensive mind map that:
-- Shows the main topic at the center
-- Branches out to key concepts and subtopics
-- Includes important details and relationships
-- Uses clear, concise labels
-- Follows Mermaid mindmap syntax
-
-Output only the Mermaid code, starting with:
-mindmap
-  root(${topic.topicName})
-    ...
-
-Do not include any explanations or additional text, only the Mermaid diagram code.`;
-
-  return mindMapPrompt;
+  return PROMPTS.mindMap.generate(topic, studyMaterials);
 }
 
 /**

@@ -1,2 +1,2 @@
-export * from "./topic.schema";
-export * from "./chat.schema";
+export * from "./topic.schema.js";
+export * from "./chat.schema.js";

@@ -1,0 +1,17 @@
+method: post
+url: /chat/complete
+parameters:
+  header:
+    - name: Content-Type
+      value: application/json
+requestBody:
+  type: application/json
+  data: "{\r
+
+    \  \"sessionId\": \"6a19c1c2c3c67c815fa8dd33\",\r
+
+    \  \"topicId\": \"69df244c568b2d6216829e1e\",\r
+
+    \  \"userQuality\": 4\r
+
+    }"

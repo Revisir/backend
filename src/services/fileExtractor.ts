@@ -1,4 +1,5 @@
-import { getLLMClient } from './llmClient';
+import { getLLMClient } from './llmClient.js';
+import { PROMPTS } from '@config/prompts.js';
 import axios from 'axios';
 
 /**
@@ -16,26 +17,6 @@ interface ExtractionResult {
 }
 
 /**
- * Extraction prompt templates for different file types
- */
-const EXTRACTION_PROMPTS = {
-  image: `Extract all text and educational content from this image.
-Include formulas, diagrams descriptions, and key concepts.
-Format the output as clear, structured markdown text.
-Use headings, bullet points, and code blocks where appropriate.`,
-
-  pdf: `Extract the main educational content from this PDF.
-Focus on key concepts, definitions, formulas, and important points.
-Organize the content with clear headings and structure using markdown.
-Use bullet points, numbered lists, and code blocks where appropriate.`,
-
-  url: `Extract the main educational content from this webpage.
-Focus on the core learning material, excluding navigation and ads.
-Summarize key points and important information.
-Format the output as structured markdown with headings and lists.`
-};
-
-/**
  * Process an image file and extract content using LLM
  * @param imageBuffer - The image file as a Buffer
  * @param mimeType - The MIME type of the image (e.g., 'image/jpeg', 'image/png')
@@ -49,7 +30,7 @@ export async function extractFromImage(
     const llmClient = getLLMClient();
     
     const content = await llmClient.sendMultimodalPrompt({
-      text: EXTRACTION_PROMPTS.image,
+      text: PROMPTS.extraction.image,
       images: [imageBuffer],
       mimeTypes: [mimeType]
     });
@@ -83,7 +64,7 @@ export async function extractFromPDF(
     
     // Gemini supports PDF files as inline data
     const content = await llmClient.sendMultimodalPrompt({
-      text: EXTRACTION_PROMPTS.pdf,
+      text: PROMPTS.extraction.pdf,
       images: [pdfBuffer],
       mimeTypes: ['application/pdf']
     });
@@ -125,10 +106,7 @@ export async function extractFromURL(
     
     // Send the HTML content to LLM for extraction
     const llmClient = getLLMClient();
-    const prompt = `${EXTRACTION_PROMPTS.url}
-
-HTML Content:
-${htmlContent}`;
+    const prompt = `${PROMPTS.extraction.url}\n\nHTML Content:\n${htmlContent}`;
 
     const content = await llmClient.sendTextPrompt(prompt);
 
@@ -160,12 +138,7 @@ export async function extractFromText(
     // For text files, we can optionally format them with LLM
     // or just return them as-is wrapped in markdown code block
     const llmClient = getLLMClient();
-    const prompt = `Format the following text content as structured markdown.
-Add appropriate headings, bullet points, and formatting to make it more readable.
-Preserve all the original information.
-
-Text Content:
-${textContent}`;
+    const prompt = `${PROMPTS.extraction.text}\n\nText Content:\n${textContent}`;
 
     const content = await llmClient.sendTextPrompt(prompt);
 

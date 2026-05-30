@@ -1,0 +1,9 @@
+method: post
+url: /chat/message
+parameters:
+  header:
+    - name: Content-Type
+      value: application/json
+requestBody:
+  type: application/json
+  data: "{\r\n  \"sessionId\": \"69993310117840b0166c652f\",\r\n  \"message\": \"Newton's first law states that an object at rest stays at rest\"\r\n}"

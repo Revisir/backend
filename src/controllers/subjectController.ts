@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
-import { Topic } from '@models/Topic';
-import { ErrorResponse } from '$types/common.types';
+import { Topic } from '@models/Topic.js';
+import { ErrorResponse } from '$types/common.types.js';
 
 /**
  * GET /api/subjects

@@ -1,21 +1,10 @@
 import { Request, Response } from "express";
-import { Topic } from "@models/Topic";
-import { calculateNextReview } from "@services/sm2Algorithm";
-import { generatePresignedUploadUrl } from "@services/s3Storage";
-import { CreateTopicResponse } from "$types/createTopic.types";
-import { ErrorResponse } from "$types/common.types";
-import { createTopicSchema } from "@/schemas";
-import { z } from "zod";
-
-const fileInfoSchema = z.object({
-  fileName: z.string().min(1),
-  size: z.number().positive(),
-  contentType: z.string().min(1),
-});
-
-const createTopicWithFilesSchema = createTopicSchema.extend({
-  files: z.array(fileInfoSchema).optional(),
-});
+import { Topic } from "@models/Topic.js";
+import { calculateNextReview } from "@services/sm2Algorithm.js";
+import { generatePresignedUploadUrl } from "@services/s3Storage.js";
+import { CreateTopicResponse } from "$types/createTopic.types.js";
+import { ErrorResponse } from "$types/common.types.js";
+import { createTopicSchema } from "@/schemas/index.js";
 
 /**
  * POST /api/topics
@@ -23,7 +12,7 @@ const createTopicWithFilesSchema = createTopicSchema.extend({
  */
 export async function createTopic(req: Request, res: Response): Promise<void> {
   try {
-    const validation = createTopicWithFilesSchema.safeParse(req.body);
+    const validation = createTopicSchema.safeParse(req.body);
     if (!validation.success) {
       res.status(400).json({
         error: {
@@ -34,7 +23,7 @@ export async function createTopic(req: Request, res: Response): Promise<void> {
       return;
     }
 
-    const { topicName, subjectName, description, dateStudied, files } = validation.data;
+    const { topicName, subjectName, description, dateStudied, files, urls } = validation.data;
     console.log("Topic create details : ", validation.data);
     const dateStudiedParsed = new Date(dateStudied);
 
@@ -50,6 +39,7 @@ export async function createTopic(req: Request, res: Response): Promise<void> {
       topicName: topicName.trim(),
       subjectName: subjectName.trim(),
       description: description?.trim() || "",
+      urls: urls || [],
       dateStudied: dateStudiedParsed,
       revisionDate: sm2Result.nextRevisionDate,
       lastRevised: null,
@@ -64,7 +54,7 @@ export async function createTopic(req: Request, res: Response): Promise<void> {
     const uploadUrls =
       files?.map((file) => ({
         fileName: file.fileName,
-        uploadUrl: generatePresignedUploadUrl(req.userId!, topic._id.toString(), file.fileName, file.contentType),
+        uploadUrl: generatePresignedUploadUrl(req.userId!, topic._id.toString(), file.fileName, file.contentType, file.size),
       })) || [];
 
     const response: CreateTopicResponse = {

@@ -1,6 +1,14 @@
 import { Schema, model, Document, Types } from 'mongoose';
 
 /**
+ * Interface for a pre-generated question
+ */
+export interface IQuestion {
+  question: string;
+  answer: string;
+}
+
+/**
  * Interface for Message subdocument
  */
 export interface IMessage {
@@ -19,6 +27,8 @@ export interface IChatSession extends Document {
   startedAt: Date;
   completedAt: Date | null;
   messages: IMessage[];
+  questions: IQuestion[];
+  currentQuestionIndex: number;
   active: boolean;
 }
 
@@ -39,6 +49,11 @@ const MessageSchema = new Schema<IMessage>({
     type: Date, 
     default: Date.now 
   }
+}, { _id: false });
+
+const QuestionSchema = new Schema<IQuestion>({
+  question: { type: String, required: true },
+  answer: { type: String, required: true }
 }, { _id: false });
 
 /**
@@ -64,6 +79,11 @@ const ChatSessionSchema = new Schema<IChatSession>({
     default: null 
   },
   messages: [MessageSchema],
+  questions: [QuestionSchema],
+  currentQuestionIndex: {
+    type: Number,
+    default: 0
+  },
   active: { 
     type: Boolean, 
     default: true 

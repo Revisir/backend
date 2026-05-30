@@ -1,7 +1,7 @@
 import { Router } from "express";
-import { getTopics, getTopicById, getDueTopics, getTopicHistory, generateTopicMindMap, getTopicMindMap, markTopicRevised, updateTopic, deleteTopicFile, uploadTopicFiles, deleteTopic } from "@controllers/topicController";
+import { getTopics, getTopicById, getDueTopics, getTopicHistory, generateTopicMindMap, getTopicMindMap, markTopicRevised, updateTopic, deleteTopicFile, uploadTopicFiles, deleteTopic, resetTopicProgress } from "@controllers/topicController.js";
 // import { upload } from "@middleware/upload";
-import { createTopic } from "@controllers/createTopicController";
+import { createTopic } from "@controllers/createTopicController.js";
 const router = Router();
 
 /**
@@ -113,6 +113,21 @@ router.get("/:id/mindmap", getTopicMindMap);
  * - 500: Server error
  */
 router.post("/:id/revised", markTopicRevised);
+
+/**
+ * POST /api/topics/:id/reset
+ * Reset topic progress (SM-2 values and revision history)
+ *
+ * Path parameters:
+ * - id: string (MongoDB ObjectId)
+ *
+ * Response:
+ * - 200: { success: true, revisionDate: string }
+ * - 400: Invalid topic ID format
+ * - 404: Topic not found
+ * - 500: Server error
+ */
+router.post("/:id/reset", resetTopicProgress);
 
 /**
  * PATCH /api/topics/:id

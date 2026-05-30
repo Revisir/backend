@@ -1,0 +1,9 @@
+method: post
+url: /chat/start
+parameters:
+  header:
+    - name: Content-Type
+      value: application/json
+requestBody:
+  type: application/json
+  data: "{\r\n  \"topicId\": \"69993310117840b0166c652f\"\r\n}"

@@ -1,4 +1,5 @@
-import { LLMClient, getLLMClient, resetLLMClient } from './llmClient';
+/// <reference types="jest" />
+import { LLMClient, getLLMClient, resetLLMClient } from './llmClient.js';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 // Mock the Google Generative AI SDK

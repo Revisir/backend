@@ -10,7 +10,7 @@ export interface IAttachedFile {
   // fileUrl: string;
   s3Path: string;
   s3Bucket: string;
-  extractedContentUrl: string;
+  extractedContentUrl?: string;
   processedAt: Date;
 }
 
@@ -29,7 +29,8 @@ export interface ITopic extends Document {
   eFactor: number;
   repetitionNumber: number;
   interval: number;
-  files: IAttachedFile[];
+  urls: string[];
+  files: Types.DocumentArray<IAttachedFile>;
   mindMap: string | null;
   mindMapGeneratedAt: Date | null;
   createdAt: Date;
@@ -64,7 +65,7 @@ const AttachedFileSchema = new Schema<IAttachedFile>({
   },
   extractedContentUrl: {
     type: String,
-    required: true,
+    default: null,
   },
   processedAt: {
     type: Date,
@@ -123,6 +124,10 @@ const TopicSchema = new Schema<ITopic>(
       type: Number,
       default: 1,
       min: 1,
+    },
+    urls: {
+      type: [String],
+      default: [],
     },
     files: [AttachedFileSchema],
     mindMap: {

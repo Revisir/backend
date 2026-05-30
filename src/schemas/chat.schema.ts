@@ -15,7 +15,6 @@ export const completeChatSessionSchema = z.object({
   sessionId: z.string().regex(mongoIdRegex, "Invalid session ID format"),
   topicId: z.string().regex(mongoIdRegex, "Invalid topic ID format"),
   userQuality: z.number().min(0, "User quality must be between 0 and 5").max(5, "User quality must be between 0 and 5"),
-  llmQuality: z.number().min(0, "LLM quality must be between 0 and 5").max(5, "LLM quality must be between 0 and 5"),
 });
 
 export type StartChatSessionInput = z.infer<typeof startChatSessionSchema>;

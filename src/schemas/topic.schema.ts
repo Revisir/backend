@@ -1,11 +1,17 @@
 import { z } from "zod";
 
 const mongoIdRegex = /^[0-9a-fA-F]{24}$/;
-
+const fileInfoSchema = z.object({
+  fileName: z.string().min(1),
+  size: z.number().positive(),
+  contentType: z.string().min(1),
+});
 export const createTopicSchema = z.object({
   topicName: z.string().trim().min(1, "Topic name is required").max(200, "Topic name must not exceed 200 characters"),
   subjectName: z.string().trim().min(1, "Subject name is required").max(100, "Subject name must not exceed 100 characters"),
   description: z.string().trim().max(1000, "Description must not exceed 1000 characters").optional(),
+  urls: z.array(z.url("Each URL must be a valid URL")).optional(),
+  files: z.array(fileInfoSchema).optional(),
   dateStudied: z
     .string()
     .refine((val) => !isNaN(Date.parse(val)), "Invalid date format for dateStudied")
@@ -20,6 +26,11 @@ export const getTopicsQuerySchema = z.object({
 
 export const topicIdParamSchema = z.object({
   id: z.string().regex(mongoIdRegex, "Invalid topic ID format"),
+});
+
+export const topicFileParamSchema = z.object({
+  id: z.string().regex(mongoIdRegex, "Invalid topic ID format"),
+  fileId: z.string().regex(mongoIdRegex, "Invalid file ID format"),
 });
 
 export type CreateTopicInput = z.infer<typeof createTopicSchema>;

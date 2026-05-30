@@ -1,0 +1,40 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Backend Dev",
+      "type": "shell",
+      "command": "pnpm run dev",
+      "isBackground": true,
+      "presentation": {
+        "panel": "dedicated",
+        "group": "backend"
+      }
+    },
+    {
+      "label": "Docker Compose",
+      "type": "shell",
+      "command": "docker compose up",
+      "isBackground": true,
+      "presentation": {
+        "panel": "dedicated",
+        "group": "docker"
+      }
+    },
+    {
+      "label": "TypeScript Watch",
+      "type": "shell",
+      "command": "tsx --watch src/lambda/fileProcessor.ts ",
+      "isBackground": true,
+      "presentation": {
+        "panel": "dedicated",
+        "group": "tsx"
+      }
+    },
+    {
+      "label": "Start Everything",
+      "dependsOn": ["Backend Dev", "Docker Compose", "TypeScript Watch"],
+      "dependsOrder": "parallel"
+    }
+  ]
+}

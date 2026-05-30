@@ -1,19 +1,7 @@
 import { PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand, ListObjectsV2Command, DeleteObjectsCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { s3Client, S3_BUCKET_NAME } from "../config/s3";
-import * as Minio from "minio";
-
-const useMinio = process.env.BUCKET_TYPE === "minio";
-// MinIO client for presigned URLs (only in development)
-const minioClient = useMinio
-  ? new Minio.Client({
-      endPoint: process.env.MINIO_ENDPOINT || "localhost",
-      port: parseInt(process.env.MINIO_PORT || "9000"),
-      useSSL: process.env.MINIO_USE_SSL === "true",
-      accessKey: process.env.MINIO_ACCESS_KEY || "minioadmin",
-      secretKey: process.env.MINIO_SECRET_KEY || "minioadmin",
-    })
-  : null;
+import { s3Client, S3_BUCKET_NAME } from "../config/s3.js";
+import { ALLOWED_CONTENT_TYPES, MAX_FILE_SIZE } from "../config/fileConstants.js";
 
 /**
  * Error codes for S3 operations
@@ -104,27 +92,36 @@ function validateS3Path(s3Path: string): void {
  * @param expiresIn - URL expiration time in seconds (default: 3600)
  * @returns Presigned URL for uploading the file
  */
-export async function generatePresignedUploadUrl(userId: string, topicId: string, fileName: string, contentType: string, expiresIn: number = 3600): Promise<string> {
+export async function generatePresignedUploadUrl(userId: string, topicId: string, fileName: string, contentType: string, fileSize: number, expiresIn: number = 3600): Promise<string> {
+  if (!ALLOWED_CONTENT_TYPES.includes(contentType)) {
+    throw new S3StorageError(S3ErrorCode.INVALID_PATH, `Content type '${contentType}' is not allowed. Allowed: ${ALLOWED_CONTENT_TYPES.join(", ")}`);
+  }
+
+  if (fileSize > MAX_FILE_SIZE) {
+    throw new S3StorageError(S3ErrorCode.INVALID_PATH, `File size ${fileSize} exceeds maximum allowed size of ${MAX_FILE_SIZE} bytes`);
+  }
+
   const s3Path = `${userId}/${topicId}/files/${fileName}`;
   validateS3Path(s3Path);
 
   try {
-    if (!useMinio) {
-      // AWS S3 presigned URL
-      const command = new PutObjectCommand({
-        Bucket: S3_BUCKET_NAME,
-        Key: s3Path,
-        ContentType: contentType,
-      });
-      const url = await getSignedUrl(s3Client, command, { expiresIn });
-      console.log(`Generated AWS presigned upload URL for: ${s3Path}`);
-      return url;
-    } else {
-      // MinIO presigned URL (metadata added by Lambda after upload)
-      const url = await minioClient!.presignedPutObject(S3_BUCKET_NAME, s3Path, expiresIn);
-      console.log(`Generated MinIO presigned upload URL for: ${s3Path}`);
-      return url;
-    }
+    const command = new PutObjectCommand({
+      Bucket: S3_BUCKET_NAME,
+      Key: s3Path,
+      ContentType: contentType,
+      ContentLength: fileSize,
+      Metadata: {
+        topicid: topicId,
+        userid: userId,
+        filename: fileName,
+      },
+    });
+    const url = await getSignedUrl(s3Client, command, {
+      expiresIn,
+      signableHeaders: new Set(["content-length"]),
+    });
+    console.log(`Generated presigned upload URL for: ${s3Path}`);
+    return url;
   } catch (error) {
     throw new S3StorageError(S3ErrorCode.ACCESS_ERROR, `Failed to generate presigned upload URL for: ${s3Path}`, error as Error);
   }
@@ -184,9 +181,11 @@ export async function saveExtractedContent(userId: string, topicId: string, cont
  */
 export async function getExtractedContent(userId: string, s3Path: string): Promise<string> {
   validateS3Path(s3Path);
-
-  // Security check: ensure path starts with userId
+  if (!s3Path) {
+    throw new S3StorageError(S3ErrorCode.INVALID_PATH, "Empty Path not allowed");
+  }
   if (!s3Path.startsWith(`${userId}/`)) {
+    // Security check: ensure path starts with userId
     throw new S3StorageError(S3ErrorCode.ACCESS_ERROR, "Unauthorized access to S3 content");
   }
 
@@ -205,6 +204,7 @@ export async function getExtractedContent(userId: string, s3Path: string): Promi
 
       // Convert stream to string
       const content = await response.Body.transformToString();
+
       return content;
     },
     S3ErrorCode.DOWNLOAD_FAILED,
@@ -233,21 +233,14 @@ export async function getSignedContentUrl(s3Path: string, expiresIn: number = 36
   }
 
   try {
-    if (!useMinio) {
-      // AWS S3 presigned URL
-      const command = new GetObjectCommand({
-        Bucket: S3_BUCKET_NAME,
-        Key: s3Path,
-      });
-      const url = await getSignedUrl(s3Client, command, { expiresIn });
-      console.log(`Generated AWS signed URL for S3 path: ${s3Path}`);
-      return url;
-    } else {
-      // MinIO presigned URL
-      const url = await minioClient!.presignedGetObject(S3_BUCKET_NAME, s3Path, expiresIn);
-      console.log(`Generated MinIO signed URL for S3 path: ${s3Path}`);
-      return url;
-    }
+    const command = new GetObjectCommand({
+      Bucket: S3_BUCKET_NAME,
+      Key: s3Path,
+      ResponseContentDisposition: "inline",
+    });
+    const url = await getSignedUrl(s3Client, command, { expiresIn });
+    console.log(`Generated signed URL for S3 path: ${s3Path}`);
+    return url;
   } catch (error) {
     throw new S3StorageError(S3ErrorCode.ACCESS_ERROR, `Failed to generate signed URL for path: ${s3Path}`, error as Error);
   }
@@ -283,6 +276,18 @@ export async function fileExists(s3Path: string): Promise<boolean> {
 }
 
 /**
+ * Deletes a file from S3/MinIO by its full path
+ */
+export async function deleteByPath(s3Path: string): Promise<void> {
+  validateS3Path(s3Path);
+  try {
+    await s3Client.send(new DeleteObjectCommand({ Bucket: S3_BUCKET_NAME, Key: s3Path }));
+  } catch (error) {
+    console.error(`Error deleting ${s3Path}:`, error);
+  }
+}
+
+/**
  * Deletes a single file from S3/MinIO
  *
  * @param userId - Cognito user ID
@@ -294,15 +299,11 @@ export async function deleteFile(userId: string, topicId: string, fileName: stri
   validateS3Path(s3Path);
 
   try {
-    if (!useMinio) {
-      const deleteCommand = new DeleteObjectCommand({
-        Bucket: S3_BUCKET_NAME,
-        Key: s3Path,
-      });
-      await s3Client.send(deleteCommand);
-    } else {
-      await minioClient!.removeObject(S3_BUCKET_NAME, s3Path);
-    }
+    const deleteCommand = new DeleteObjectCommand({
+      Bucket: S3_BUCKET_NAME,
+      Key: s3Path,
+    });
+    await s3Client.send(deleteCommand);
     console.log(`Deleted file: ${s3Path}`);
   } catch (error) {
     console.error(`Error deleting file ${s3Path}:`, error);
@@ -320,44 +321,25 @@ export async function deleteTopicFiles(userId: string, topicId: string): Promise
   const prefix = `${userId}/${topicId}/`;
 
   try {
-    console.log("Deleting from Some bucket", useMinio);
-    if (!useMinio) {
-      const listCommand = new ListObjectsV2Command({
-        Bucket: S3_BUCKET_NAME,
-        Prefix: prefix,
-      });
-      const listResponse = await s3Client.send(listCommand);
+    const listCommand = new ListObjectsV2Command({
+      Bucket: S3_BUCKET_NAME,
+      Prefix: prefix,
+    });
+    const listResponse = await s3Client.send(listCommand);
 
-      if (!listResponse.Contents || listResponse.Contents.length === 0) {
-        console.log(`No files found for topic: ${prefix}`);
-        return;
-      }
-
-      const deleteCommand = new DeleteObjectsCommand({
-        Bucket: S3_BUCKET_NAME,
-        Delete: {
-          Objects: listResponse.Contents.map((obj) => ({ Key: obj.Key! })),
-        },
-      });
-      await s3Client.send(deleteCommand);
-      console.log(`Deleted ${listResponse.Contents.length} files for topic: ${prefix}`);
-    } else {
-      console.log("Deleting from Minio");
-      const objectsStream = minioClient!.listObjects(S3_BUCKET_NAME, prefix, true);
-      const objectsList: string[] = [];
-
-      for await (const obj of objectsStream) {
-        if (obj.name) objectsList.push(obj.name);
-      }
-
-      if (objectsList.length === 0) {
-        console.log(`No files found for topic: ${prefix}`);
-        return;
-      }
-
-      await minioClient!.removeObjects(S3_BUCKET_NAME, objectsList);
-      console.log(`Deleted ${objectsList.length} files for topic: ${prefix}`);
+    if (!listResponse.Contents || listResponse.Contents.length === 0) {
+      console.log(`No files found for topic: ${prefix}`);
+      return;
     }
+
+    const deleteCommand = new DeleteObjectsCommand({
+      Bucket: S3_BUCKET_NAME,
+      Delete: {
+        Objects: listResponse.Contents.map((obj) => ({ Key: obj.Key! })),
+      },
+    });
+    await s3Client.send(deleteCommand);
+    console.log(`Deleted ${listResponse.Contents.length} files for topic: ${prefix}`);
   } catch (error) {
     console.error(`Error deleting files for topic ${prefix}:`, error);
     throw new S3StorageError(S3ErrorCode.ACCESS_ERROR, `Failed to delete files for topic: ${prefix}`, error as Error);

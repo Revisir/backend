@@ -1,15 +1,13 @@
-import dotenv from "dotenv";
-// Load environment variables
-dotenv.config();
+import "dotenv/config";
 
 import express from "express";
 import cors from "cors";
-import { connectDatabase } from "@config/database";
-import { optionalAuth } from "@middleware/auth";
-import topicRoutes from "@routes/topicRoutes";
-import statisticsRoutes from "@routes/statisticsRoutes";
-import chatRoutes from "@routes/chatRoutes";
-import subjectRoutes from "@routes/subjectRoutes";
+import { connectDatabase } from "@config/database.js";
+import { optionalAuth } from "@middleware/auth.js";
+import topicRoutes from "@routes/topicRoutes.js";
+import statisticsRoutes from "@routes/statisticsRoutes.js";
+import chatRoutes from "@routes/chatRoutes.js";
+import subjectRoutes from "@routes/subjectRoutes.js";
 
 const app = express();
 const PORT = process.env.PORT || 5000;

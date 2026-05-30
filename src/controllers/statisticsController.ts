@@ -1,8 +1,8 @@
 import { Request, Response } from "express";
-import { Topic } from "@models/Topic";
-import { RevisionRecord } from "@models/RevisionRecord";
-import { DuePerSubject, StatisticsResponse } from "$types/statistics.types";
-import { ErrorResponse } from "$types/common.types";
+import { Topic } from "@models/Topic.js";
+import { RevisionRecord } from "@models/RevisionRecord.js";
+import { DuePerSubject, StatisticsResponse } from "$types/statistics.types.js";
+import { ErrorResponse } from "$types/common.types.js";
 import { DateTime } from "luxon";
 
 /**

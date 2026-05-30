@@ -1,12 +1,12 @@
 import { Request, Response } from "express";
-import { Topic } from "@models/Topic";
-import { RevisionRecord } from "@models/RevisionRecord";
-import { generateMindMap } from "@services/mindMapGenerator";
-import { calculateNextReview } from "@services/sm2Algorithm";
-import { generatePresignedUploadUrl, deleteTopicFiles, deleteFile } from "@services/s3Storage";
-import { GetTopicsResponse } from "$types/topic.types";
-import { ErrorResponse } from "$types/common.types";
-import { getTopicsQuerySchema, topicIdParamSchema } from "@/schemas";
+import { Topic } from "@models/Topic.js";
+import { RevisionRecord } from "@models/RevisionRecord.js";
+import { generateMindMap } from "@services/mindMapGenerator.js";
+import { calculateNextReview } from "@services/sm2Algorithm.js";
+import { generatePresignedUploadUrl, deleteTopicFiles, deleteFile, deleteByPath, getSignedContentUrl } from "@services/s3Storage.js";
+import { GetTopicsResponse } from "$types/topic.types.js";
+import { ErrorResponse } from "$types/common.types.js";
+import { getTopicsQuerySchema, topicIdParamSchema, topicFileParamSchema } from "@/schemas/index.js";
 import { z } from "zod";
 import { DateTime } from "luxon";
 
@@ -19,17 +19,25 @@ const updateTopicSchema = z.object({
   topicName: z.string().max(200).optional(),
   subjectName: z.string().max(100).optional(),
   description: z.string().optional(),
+  urls: z.array(z.string().url()).optional(),
   dateStudied: z.string().datetime().optional(),
 });
 
+import { ALLOWED_CONTENT_TYPES, MAX_FILE_SIZE, MAX_FILES_PER_UPLOAD, MAX_FILES_PER_TOPIC } from "@/config/fileConstants.js";
+
 const fileInfoSchema = z.object({
   fileName: z.string().min(1),
-  size: z.number().positive(),
-  contentType: z.string().min(1),
+  size: z
+    .number()
+    .positive()
+    .max(MAX_FILE_SIZE, `File size must not exceed ${MAX_FILE_SIZE / (1024 * 1024)}MB`),
+  contentType: z.string().refine((val) => ALLOWED_CONTENT_TYPES.includes(val), {
+    message: `Content type must be one of: ${ALLOWED_CONTENT_TYPES.join(", ")}`,
+  }),
 });
 
 const uploadFilesSchema = z.object({
-  files: z.array(fileInfoSchema).min(1),
+  files: z.array(fileInfoSchema).min(1).max(MAX_FILES_PER_UPLOAD, `Cannot upload more than ${MAX_FILES_PER_UPLOAD} files at once`),
 });
 
 /**
@@ -111,7 +119,16 @@ export async function getTopicById(req: Request, res: Response): Promise<void> {
       return;
     }
 
-    res.status(200).json(topic);
+    const files = await Promise.all(
+      (topic.files || []).map(async (file) => ({
+        _id: file._id,
+        fileName: file.fileName,
+        fileType: file.fileType,
+        fileUrl: await getSignedContentUrl(file.s3Path),
+      })),
+    );
+
+    res.status(200).json({ ...topic, files });
   } catch (error) {
     console.error("Error fetching topic by ID:", error);
 
@@ -350,6 +367,46 @@ export async function getTopicMindMap(req: Request, res: Response): Promise<void
 }
 
 /**
+ * Shared logic: calculate SM-2, create revision record, update topic.
+ */
+export async function recordRevision({ userId, topic, userQuality, llmQuality }: { userId: string; topic: any; userQuality: number; llmQuality?: number }) {
+  const today = DateTime.now().toUTC();
+  const todayJs = today.toJSDate();
+
+  const finalQuality = llmQuality ? (userQuality + llmQuality) / 2 : userQuality;
+
+  const lastRecord = await RevisionRecord.findOne({ topicId: topic._id, userId }).sort({ revisionDate: -1 });
+
+  const result = calculateNextReview({
+    eFactor: lastRecord?.newEFactor ?? topic.eFactor,
+    repetitionNumber: topic.repetitionNumber,
+    interval: lastRecord?.newInterval ?? topic.interval,
+    quality: finalQuality,
+  });
+
+  await RevisionRecord.create({
+    userId,
+    topicId: topic._id,
+    revisionDate: todayJs,
+    userQuality,
+    llmQuality: llmQuality ?? userQuality,
+    finalQuality,
+    newEFactor: result.eFactor,
+    newInterval: result.interval,
+    nextRevisionDate: result.nextRevisionDate,
+  });
+
+  topic.eFactor = result.eFactor;
+  topic.interval = result.interval;
+  topic.revisionDate = result.nextRevisionDate;
+  topic.repetitionNumber = result.repetitionNumber;
+  topic.lastRevised = todayJs;
+  await topic.save();
+
+  return { nextRevisionDate: result.nextRevisionDate, finalQuality, lastRevised: todayJs };
+}
+
+/**
  * POST /api/topics/:id/revised
  * Mark topic as revised/unrevised and create revision record
  */
@@ -392,7 +449,6 @@ export async function markTopicRevised(req: Request, res: Response): Promise<voi
     }
 
     const today = DateTime.now().toUTC();
-    const todayJs = today.toJSDate();
     const todayDayStart = today.startOf("day").toJSDate();
     const todayDayEnd = today.endOf("day").toJSDate();
 
@@ -427,40 +483,12 @@ export async function markTopicRevised(req: Request, res: Response): Promise<voi
       return;
     }
 
-    const finalQuality = llmQuality ? (userQuality + llmQuality) / 2 : userQuality;
-
-    const lastRecord = await RevisionRecord.findOne({ topicId: id, userId: req.userId }).sort({ revisionDate: -1 });
-
-    const result = calculateNextReview({
-      eFactor: lastRecord?.newEFactor ?? topic.eFactor,
-      repetitionNumber: topic.repetitionNumber,
-      interval: lastRecord?.newInterval ?? topic.interval,
-      quality: finalQuality,
-    });
-
-    await RevisionRecord.create({
-      userId: req.userId,
-      topicId: id,
-      revisionDate: todayJs,
-      userQuality,
-      llmQuality: llmQuality ?? userQuality,
-      finalQuality,
-      newEFactor: result.eFactor,
-      newInterval: result.interval,
-      nextRevisionDate: result.nextRevisionDate,
-    });
-
-    topic.eFactor = result.eFactor;
-    topic.interval = result.interval;
-    topic.revisionDate = result.nextRevisionDate;
-    topic.repetitionNumber = result.repetitionNumber;
-    topic.lastRevised = todayJs;
-    await topic.save();
+    const result = await recordRevision({ userId: req.userId!, topic, userQuality, llmQuality });
 
     res.status(200).json({
       success: true,
       nextRevisionDate: result.nextRevisionDate.toISOString(),
-      lastRevised: todayJs,
+      lastRevised: result.lastRevised,
     });
   } catch (error) {
     console.error("Error marking topic as revised:", error);
@@ -520,6 +548,7 @@ export async function updateTopic(req: Request, res: Response): Promise<void> {
     if (updates.topicName) topic.topicName = updates.topicName.trim();
     if (updates.subjectName) topic.subjectName = updates.subjectName.trim();
     if (updates.description !== undefined) topic.description = updates.description.trim();
+    if (updates.urls !== undefined) topic.urls = updates.urls;
 
     if (updates.dateStudied) {
       topic.dateStudied = new Date(updates.dateStudied);
@@ -552,7 +581,18 @@ export async function updateTopic(req: Request, res: Response): Promise<void> {
  */
 export async function deleteTopicFile(req: Request, res: Response): Promise<void> {
   try {
-    const { id, fileId } = req.params;
+    const validation = topicFileParamSchema.safeParse(req.params);
+    if (!validation.success) {
+      res.status(400).json({
+        error: {
+          code: "VALIDATION_ERROR",
+          message: validation.error.issues[0].message,
+        },
+      } as ErrorResponse);
+      return;
+    }
+
+    const { id, fileId } = validation.data;
 
     const topic = await Topic.findOne({ _id: id, userId: req.userId });
     if (!topic) {
@@ -565,8 +605,8 @@ export async function deleteTopicFile(req: Request, res: Response): Promise<void
       return;
     }
 
-    const fileIndex = topic.files.findIndex((f) => f._id?.toString() === fileId);
-    if (fileIndex === -1) {
+    const file = topic.files.id(fileId);
+    if (!file) {
       res.status(404).json({
         error: {
           code: "FILE_NOT_FOUND",
@@ -576,10 +616,10 @@ export async function deleteTopicFile(req: Request, res: Response): Promise<void
       return;
     }
 
-    const fileName = topic.files[fileIndex].fileName;
-    await deleteFile(req.userId!, Array.isArray(id) ? id[0] : id, fileName);
+    await deleteFile(req.userId!, id, file.fileName);
+    if (file.extractedContentUrl) await deleteByPath(file.extractedContentUrl);
 
-    topic.files.splice(fileIndex, 1);
+    file.deleteOne();
     await topic.save();
 
     res.status(200).json({ success: true });
@@ -638,10 +678,20 @@ export async function uploadTopicFiles(req: Request, res: Response): Promise<voi
       return;
     }
 
+    if (topic.files.length + files.length > MAX_FILES_PER_TOPIC) {
+      res.status(400).json({
+        error: {
+          code: "FILE_LIMIT_EXCEEDED",
+          message: `A topic cannot have more than ${MAX_FILES_PER_TOPIC} files. Current: ${topic.files.length}, Requested: ${files.length}`,
+        },
+      } as ErrorResponse);
+      return;
+    }
+
     const uploadUrls = await Promise.all(
       files.map(async (file) => ({
         fileName: file.fileName,
-        uploadUrl: await generatePresignedUploadUrl(req.userId!, id, file.fileName, file.contentType),
+        uploadUrl: await generatePresignedUploadUrl(req.userId!, id, file.fileName, file.contentType, file.size),
       })),
     );
 
@@ -653,6 +703,59 @@ export async function uploadTopicFiles(req: Request, res: Response): Promise<voi
       error: {
         code: "INTERNAL_SERVER_ERROR",
         message: "Failed to generate upload URLs",
+        details: error instanceof Error ? error.message : "Unknown error",
+      },
+    } as ErrorResponse);
+  }
+}
+
+/**
+ * POST /api/topics/:id/reset
+ * Reset topic progress (SM-2 values and revision records)
+ */
+export async function resetTopicProgress(req: Request, res: Response): Promise<void> {
+  try {
+    const validation = topicIdParamSchema.safeParse(req.params);
+    if (!validation.success) {
+      res.status(400).json({
+        error: {
+          code: "VALIDATION_ERROR",
+          message: validation.error.issues[0].message,
+        },
+      } as ErrorResponse);
+      return;
+    }
+
+    const { id } = validation.data;
+
+    const topic = await Topic.findOne({ _id: id, userId: req.userId });
+    if (!topic) {
+      res.status(404).json({
+        error: {
+          code: "TOPIC_NOT_FOUND",
+          message: "Topic not found or access denied",
+        },
+      } as ErrorResponse);
+      return;
+    }
+
+    topic.eFactor = 2.5;
+    topic.interval = 1;
+    topic.repetitionNumber = 0;
+    topic.revisionDate = topic.dateStudied;
+    topic.lastRevised = null;
+    await topic.save();
+
+    await RevisionRecord.deleteMany({ topicId: id, userId: req.userId });
+
+    res.status(200).json({ success: true, revisionDate: topic.revisionDate });
+  } catch (error) {
+    console.error("Error resetting topic progress:", error);
+
+    res.status(500).json({
+      error: {
+        code: "INTERNAL_SERVER_ERROR",
+        message: "Failed to reset topic progress",
         details: error instanceof Error ? error.message : "Unknown error",
       },
     } as ErrorResponse);
