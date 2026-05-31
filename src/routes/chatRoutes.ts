@@ -1,7 +1,9 @@
 import { Router } from 'express';
 import { startChatSession, sendChatMessage, completeChatSession } from '@controllers/chatController.js';
+import { requireAIConfig } from '@middleware/aiConfigCheck.js';
 
 const router = Router();
+router.use(requireAIConfig);
 
 /**
  * POST /api/chat/start

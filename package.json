@@ -7,7 +7,6 @@
   "scripts": {
     "dev": "tsx --watch src/index.ts ",
     "build": "tsc && tsc-alias",
-    "build:lambda": "build-lambda.bat",
     "start": "node dist/index.js",
     "test": "jest",
     "test:watch": "jest --watch",
@@ -32,8 +31,7 @@
     "dotenv": "^17.3.1",
     "exa-js": "^2.13.0",
     "express": "^5.2.1",
-    "jsonwebtoken": "^9.0.3",
-    "jwks-rsa": "^3.2.2",
+    "jose": "^6.2.3",
     "luxon": "^3.7.2",
     "minio": "^8.0.6",
     "mongoose": "^9.2.1",

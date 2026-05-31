@@ -1,6 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import jwt from "jsonwebtoken";
-import jwksClient from "jwks-rsa";
+import * as jose from "jose";
 
 // Extend Express Request type to include user information
 declare global {
@@ -11,27 +10,10 @@ declare global {
     }
   }
 }
-
-// Initialize JWKS client for Cognito public keys
-const client = jwksClient({
-  jwksUri: `https://cognito-idp.${process.env.AWS_REGION}.amazonaws.com/${process.env.COGNITO_USER_POOL_ID}/.well-known/jwks.json`,
-  cache: true,
-  cacheMaxAge: 600000, // 10 minutes
-  rateLimit: true,
-  jwksRequestsPerMinute: 10,
-});
-
-// Function to get the signing key from JWKS
-function getKey(header: jwt.JwtHeader, callback: jwt.SigningKeyCallback) {
-  client.getSigningKey(header.kid, (err, key) => {
-    if (err) {
-      callback(err);
-      return;
-    }
-    const signingKey = key?.getPublicKey();
-    callback(null, signingKey);
-  });
+if (!process.env.AUTH_AUTHORITY) {
+  throw new Error("Need AUTH_AUTHORITY");
 }
+const client = jose.createRemoteJWKSet(new URL(`${process.env.AUTH_AUTHORITY}/.well-known/jwks.json`));
 
 /**
  * Authentication middleware that validates JWT tokens from AWS Cognito
@@ -41,7 +23,7 @@ export async function authenticateToken(req: Request, res: Response, next: NextF
   try {
     // Extract token from Authorization header
     const authHeader = req.headers["authorization"];
-    const token = authHeader && authHeader.split(" ")[1]; // Bearer TOKEN
+    const token = authHeader && authHeader.replace("Bearer", "").trim(); // Bearer TOKEN
 
     if (!token) {
       res.status(401).json({
@@ -52,56 +34,50 @@ export async function authenticateToken(req: Request, res: Response, next: NextF
       });
       return;
     }
-
     // Verify the JWT token
-    jwt.verify(
-      token,
-      getKey,
-      {
-        algorithms: ["RS256"],
-        issuer: `https://cognito-idp.${process.env.AWS_REGION}.amazonaws.com/${process.env.COGNITO_USER_POOL_ID}`,
-      },
-      (err, decoded) => {
-        if (err) {
-          // Handle different JWT errors
-          if (err.name === "TokenExpiredError") {
-            res.status(401).json({
-              error: {
-                code: "TOKEN_EXPIRED",
-                message: "Token has expired. Please log in again.",
-              },
-            });
-            return;
-          }
-
-          if (err.name === "JsonWebTokenError") {
-            res.status(403).json({
-              error: {
-                code: "INVALID_TOKEN",
-                message: "Invalid token. Please log in again.",
-              },
-            });
-            return;
-          }
-
-          // Generic error
-          res.status(403).json({
+    jose
+      .jwtVerify(token, client)
+      .then(({ payload }) => {
+        console.log(payload);
+        req.userId = payload.sub; // Cognito user ID (sub claim)
+        if (payload.email) {
+          req.userEmail = payload.email as string; // User email
+        } else {
+          throw new Error("Email is required in Auth Scope");
+        }
+        next();
+      })
+      .catch((err) => {
+        // Handle different JWT errors
+        if (err.name === "JWTExpired") {
+          res.status(401).json({
             error: {
-              code: "TOKEN_VERIFICATION_FAILED",
-              message: "Token verification failed.",
+              code: "TOKEN_EXPIRED",
+              message: "Token has expired. Please log in again.",
             },
           });
           return;
         }
 
-        // Extract user information from decoded token
-        const payload = decoded as jwt.JwtPayload;
-        req.userId = payload.sub; // Cognito user ID (sub claim)
-        req.userEmail = payload.email; // User email
+        if (err.name === "JWSInvalid") {
+          res.status(403).json({
+            error: {
+              code: "INVALID_TOKEN",
+              message: "Invalid token. Please log in again.",
+            },
+          });
+          return;
+        }
 
-        next();
-      },
-    );
+        // Generic error
+        res.status(403).json({
+          error: {
+            code: "TOKEN_VERIFICATION_FAILED",
+            message: "Token verification failed.",
+          },
+        });
+        return;
+      });
   } catch (error) {
     console.error("Authentication error:", error);
     res.status(500).json({
@@ -119,7 +95,6 @@ export async function authenticateToken(req: Request, res: Response, next: NextF
  * and SKIP_AUTH environment variable is set to 'true'
  */
 export function optionalAuth(req: Request, res: Response, next: NextFunction): void {
-  console.log("Authorising");
   // Skip authentication in development mode if configured
   if (process.env.NODE_ENV === "development" && process.env.SKIP_AUTH === "true") {
     // Use a test user ID for development

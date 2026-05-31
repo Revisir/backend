@@ -86,7 +86,7 @@ Provide only the numeric rating (0-5) as a single number.`,
   },
 
   mindMap: {
-    generate: (topic: { topicName: string; subjectName: string; description?: string }, studyMaterials: string) =>
+    generate: (studyMaterials: string) =>
       `Generate a mind map for the following Material:
 
 ${studyMaterials}

@@ -2,6 +2,7 @@ import { Router } from "express";
 import { getTopics, getTopicById, getDueTopics, getTopicHistory, generateTopicMindMap, getTopicMindMap, markTopicRevised, updateTopic, deleteTopicFile, uploadTopicFiles, deleteTopic, resetTopicProgress } from "@controllers/topicController.js";
 // import { upload } from "@middleware/upload";
 import { createTopic } from "@controllers/createTopicController.js";
+import { requireAIConfig } from "@middleware/aiConfigCheck.js";
 const router = Router();
 
 /**
@@ -78,7 +79,7 @@ router.get("/:id/history", getTopicHistory);
  * - 404: Topic not found
  * - 500: Server error (S3_ACCESS_ERROR, LLM_UNAVAILABLE, VALIDATION_ERROR, INTERNAL_SERVER_ERROR)
  */
-router.post("/:id/mindmap", generateTopicMindMap);
+router.post("/:id/mindmap", requireAIConfig, generateTopicMindMap);
 
 /**
  * GET /api/topics/:id/mindmap
@@ -93,7 +94,7 @@ router.post("/:id/mindmap", generateTopicMindMap);
  * - 404: Topic not found or mind map not generated
  * - 500: Server error
  */
-router.get("/:id/mindmap", getTopicMindMap);
+router.get("/:id/mindmap", requireAIConfig, getTopicMindMap);
 
 /**
  * POST /api/topics/:id/revised
