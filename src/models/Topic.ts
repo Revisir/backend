@@ -6,12 +6,22 @@ import { Schema, model, Document, Types } from "mongoose";
 export interface IAttachedFile {
   _id?: Types.ObjectId;
   fileName: string;
-  fileType: "image" | "pdf" | "url" | "text";
+  fileType: "image" | "pdf" | "text";
   // fileUrl: string;
   s3Path: string;
   s3Bucket: string;
   extractedContentUrl?: string;
   processedAt: Date;
+}
+
+/**
+ * Interface for AttachedUrl subdocument
+ */
+export interface IAttachedUrl {
+  _id?: Types.ObjectId;
+  url: string;
+  extractedContentPath?: string;
+  processedAt?: Date;
 }
 
 /**
@@ -29,7 +39,7 @@ export interface ITopic extends Document {
   eFactor: number;
   repetitionNumber: number;
   interval: number;
-  urls: string[];
+  urls: Types.DocumentArray<IAttachedUrl>;
   files: Types.DocumentArray<IAttachedFile>;
   mindMap: string | null;
   mindMapGeneratedAt: Date | null;
@@ -48,7 +58,7 @@ const AttachedFileSchema = new Schema<IAttachedFile>({
   },
   fileType: {
     type: String,
-    enum: ["image", "pdf", "url", "text"],
+    enum: ["image", "pdf", "text"],
     required: true,
   },
   // fileUrl: {
@@ -70,6 +80,24 @@ const AttachedFileSchema = new Schema<IAttachedFile>({
   processedAt: {
     type: Date,
     default: Date.now,
+  },
+});
+
+/**
+ * Mongoose schema for AttachedUrl subdocument
+ */
+const AttachedUrlSchema = new Schema<IAttachedUrl>({
+  url: {
+    type: String,
+    required: true,
+  },
+  extractedContentPath: {
+    type: String,
+    default: null,
+  },
+  processedAt: {
+    type: Date,
+    default: null,
   },
 });
 
@@ -126,7 +154,7 @@ const TopicSchema = new Schema<ITopic>(
       min: 1,
     },
     urls: {
-      type: [String],
+      type: [AttachedUrlSchema],
       default: [],
     },
     files: [AttachedFileSchema],

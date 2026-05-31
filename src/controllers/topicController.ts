@@ -7,6 +7,7 @@ import { generatePresignedUploadUrl, deleteTopicFiles, deleteFile, deleteByPath,
 import { GetTopicsResponse } from "$types/topic.types.js";
 import { ErrorResponse } from "$types/common.types.js";
 import { getTopicsQuerySchema, topicIdParamSchema, topicFileParamSchema } from "@/schemas/index.js";
+import { invokeUrlProcessor } from "@services/lambdaInvoker.js";
 import { z } from "zod";
 import { DateTime } from "luxon";
 
@@ -222,7 +223,7 @@ export async function getTopicHistory(req: Request, res: Response): Promise<void
 
 /**
  * POST /api/topics/:id/mindmap
- * Generate a Mermaid mind map for a topic
+ * Generate a MindElixir mind map for a topic
  */
 export async function generateTopicMindMap(req: Request, res: Response): Promise<void> {
   try {
@@ -250,14 +251,26 @@ export async function generateTopicMindMap(req: Request, res: Response): Promise
       return;
     }
 
-    const mermaidCode = await generateMindMap(topic);
+    const hasFiles = topic.files.length > 0;
+    const hasHttpUrls = topic.urls.some((u) => u.url.startsWith("http://") || u.url.startsWith("https://"));
+    if (!hasFiles && !hasHttpUrls) {
+      res.status(400).json({
+        error: {
+          code: "NO_MATERIALS",
+          message: "Cannot generate mind map without study materials or valid URLs",
+        },
+      } as ErrorResponse);
+      return;
+    }
 
-    topic.mindMap = mermaidCode;
+    const elixirCode = await generateMindMap(topic);
+
+    topic.mindMap = elixirCode;
     topic.mindMapGeneratedAt = new Date();
     await topic.save();
 
     res.status(200).json({
-      mindmap: mermaidCode,
+      mindmap: elixirCode,
       generatedAt: topic.mindMapGeneratedAt.toISOString(),
     });
   } catch (error) {
@@ -286,11 +299,11 @@ export async function generateTopicMindMap(req: Request, res: Response): Promise
         return;
       }
 
-      if (error.message.includes("Mermaid") || error.message.includes("syntax")) {
+      if (error.message.includes("Elixir") || error.message.includes("syntax")) {
         res.status(500).json({
           error: {
             code: "VALIDATION_ERROR",
-            message: "Generated mind map has invalid Mermaid syntax",
+            message: "Generated mind map has invalid MindElixir format",
             details: error.message,
           },
         } as ErrorResponse);
@@ -548,7 +561,32 @@ export async function updateTopic(req: Request, res: Response): Promise<void> {
     if (updates.topicName) topic.topicName = updates.topicName.trim();
     if (updates.subjectName) topic.subjectName = updates.subjectName.trim();
     if (updates.description !== undefined) topic.description = updates.description.trim();
-    if (updates.urls !== undefined) topic.urls = updates.urls;
+    if (updates.urls !== undefined) {
+      const existingUrls = topic.urls.map((u) => u.url);
+      const newUrls = updates.urls.filter((u) => !existingUrls.includes(u));
+      const removedUrls = topic.urls.filter((u) => !updates.urls!.includes(u.url));
+
+      // Delete extracted files for removed URLs
+      for (const removed of removedUrls) {
+        if (removed.extractedContentPath) {
+          await deleteByPath(removed.extractedContentPath);
+        }
+      }
+
+      topic.urls = updates.urls.map((url) => ({ url })) as any;
+      const processableUrls = newUrls.filter((u) => u.startsWith("http://") || u.startsWith("https://"));
+      if (processableUrls.length) {
+        invokeUrlProcessor({ topicId: id, userId: req.userId!, urls: processableUrls });
+      }
+    }
+
+    // Clear mindmap if no materials remain
+    const hasFiles = topic.files.length > 0;
+    const hasHttpUrls = topic.urls.some((u) => u.url.startsWith("http://") || u.url.startsWith("https://"));
+    if (!hasFiles && !hasHttpUrls) {
+      topic.mindMap = null;
+      topic.mindMapGeneratedAt = null;
+    }
 
     if (updates.dateStudied) {
       topic.dateStudied = new Date(updates.dateStudied);
@@ -620,6 +658,15 @@ export async function deleteTopicFile(req: Request, res: Response): Promise<void
     if (file.extractedContentUrl) await deleteByPath(file.extractedContentUrl);
 
     file.deleteOne();
+
+    // Clear mindmap if no materials remain after file deletion
+    const hasRemainingFiles = topic.files.length > 0;
+    const hasHttpUrls = topic.urls.some((u) => u.url.startsWith("http://") || u.url.startsWith("https://"));
+    if (!hasRemainingFiles && !hasHttpUrls) {
+      topic.mindMap = null;
+      topic.mindMapGeneratedAt = null;
+    }
+
     await topic.save();
 
     res.status(200).json({ success: true });

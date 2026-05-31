@@ -17,7 +17,8 @@ Use bullet points, numbered lists, and code blocks where appropriate.`,
     url: `Extract the main educational content from this webpage.
 Focus on the core learning material, excluding navigation and ads.
 Summarize key points and important information.
-Format the output as structured markdown with headings and lists.`,
+Format the output as structured markdown with headings and lists.
+Do not include Social Media, Legal, Contents Menu. Only extract Core information`,
 
     text: `Format the following text content as structured markdown.
 Add appropriate headings, bullet points, and formatting to make it more readable.
@@ -86,13 +87,8 @@ Provide only the numeric rating (0-5) as a single number.`,
 
   mindMap: {
     generate: (topic: { topicName: string; subjectName: string; description?: string }, studyMaterials: string) =>
-      `Generate a Mermaid mind map for the following topic:
+      `Generate a mind map for the following Material:
 
-Topic: ${topic.topicName}
-Subject: ${topic.subjectName}
-Description: ${topic.description || "[No description provided]"}
-
-Study Materials:
 ${studyMaterials}
 
 Create a comprehensive mind map that:
@@ -100,13 +96,19 @@ Create a comprehensive mind map that:
 - Branches out to key concepts and subtopics
 - Includes important details and relationships
 - Uses clear, concise labels
-- Follows Mermaid mindmap syntax
+- In MindElixir format
+- Shoul dnot contain any infromation other than the provided Text
 
-Output only the Mermaid code, starting with:
-mindmap
-  root(${topic.topicName})
+Output only the object code, starting with object as the following example
+  "{
+  nodeData: {
+    id: "root",
+    topic: "Example Topic",
+    root: true,
+    children: [
+      {"
     ...
 
-Do not include any explanations or additional text, only the Mermaid diagram code.`,
+Do not include any explanations or additional text, only the MindElixir node object.`,
   },
 } as const;

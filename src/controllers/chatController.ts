@@ -31,6 +31,15 @@ export async function startChatSession(req: Request, res: Response): Promise<voi
       return;
     }
 
+    const hasFiles = topic.files.length > 0;
+    const hasHttpUrls = topic.urls.some((u) => u.url.startsWith("http://") || u.url.startsWith("https://"));
+    if (!hasFiles && !hasHttpUrls) {
+      res.status(400).json({
+        error: { code: "NO_MATERIALS", message: "Cannot start chat session without study materials or valid URLs" },
+      } as ErrorResponse);
+      return;
+    }
+
     // Build study materials context
     const { studyMaterials } = await buildChatContext(topic);
 

@@ -1,6 +1,6 @@
-import { Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
-import jwksClient from 'jwks-rsa';
+import { Request, Response, NextFunction } from "express";
+import jwt from "jsonwebtoken";
+import jwksClient from "jwks-rsa";
 
 // Extend Express Request type to include user information
 declare global {
@@ -18,7 +18,7 @@ const client = jwksClient({
   cache: true,
   cacheMaxAge: 600000, // 10 minutes
   rateLimit: true,
-  jwksRequestsPerMinute: 10
+  jwksRequestsPerMinute: 10,
 });
 
 // Function to get the signing key from JWKS
@@ -37,22 +37,18 @@ function getKey(header: jwt.JwtHeader, callback: jwt.SigningKeyCallback) {
  * Authentication middleware that validates JWT tokens from AWS Cognito
  * Extracts userId and userEmail from the token and attaches them to the request object
  */
-export async function authenticateToken(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
+export async function authenticateToken(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     // Extract token from Authorization header
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+    const authHeader = req.headers["authorization"];
+    const token = authHeader && authHeader.split(" ")[1]; // Bearer TOKEN
 
     if (!token) {
       res.status(401).json({
         error: {
-          code: 'NO_TOKEN',
-          message: 'Authentication required. Please provide a valid token.'
-        }
+          code: "NO_TOKEN",
+          message: "Authentication required. Please provide a valid token.",
+        },
       });
       return;
     }
@@ -62,28 +58,28 @@ export async function authenticateToken(
       token,
       getKey,
       {
-        algorithms: ['RS256'],
-        issuer: `https://cognito-idp.${process.env.AWS_REGION}.amazonaws.com/${process.env.COGNITO_USER_POOL_ID}`
+        algorithms: ["RS256"],
+        issuer: `https://cognito-idp.${process.env.AWS_REGION}.amazonaws.com/${process.env.COGNITO_USER_POOL_ID}`,
       },
       (err, decoded) => {
         if (err) {
           // Handle different JWT errors
-          if (err.name === 'TokenExpiredError') {
+          if (err.name === "TokenExpiredError") {
             res.status(401).json({
               error: {
-                code: 'TOKEN_EXPIRED',
-                message: 'Token has expired. Please log in again.'
-              }
+                code: "TOKEN_EXPIRED",
+                message: "Token has expired. Please log in again.",
+              },
             });
             return;
           }
 
-          if (err.name === 'JsonWebTokenError') {
+          if (err.name === "JsonWebTokenError") {
             res.status(403).json({
               error: {
-                code: 'INVALID_TOKEN',
-                message: 'Invalid token. Please log in again.'
-              }
+                code: "INVALID_TOKEN",
+                message: "Invalid token. Please log in again.",
+              },
             });
             return;
           }
@@ -91,9 +87,9 @@ export async function authenticateToken(
           // Generic error
           res.status(403).json({
             error: {
-              code: 'TOKEN_VERIFICATION_FAILED',
-              message: 'Token verification failed.'
-            }
+              code: "TOKEN_VERIFICATION_FAILED",
+              message: "Token verification failed.",
+            },
           });
           return;
         }
@@ -104,15 +100,15 @@ export async function authenticateToken(
         req.userEmail = payload.email; // User email
 
         next();
-      }
+      },
     );
   } catch (error) {
-    console.error('Authentication error:', error);
+    console.error("Authentication error:", error);
     res.status(500).json({
       error: {
-        code: 'AUTH_ERROR',
-        message: 'An error occurred during authentication.'
-      }
+        code: "AUTH_ERROR",
+        message: "An error occurred during authentication.",
+      },
     });
   }
 }
@@ -122,16 +118,13 @@ export async function authenticateToken(
  * Allows requests without authentication when NODE_ENV is 'development'
  * and SKIP_AUTH environment variable is set to 'true'
  */
-export function optionalAuth(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): void {
+export function optionalAuth(req: Request, res: Response, next: NextFunction): void {
+  console.log("Authorising");
   // Skip authentication in development mode if configured
-  if (process.env.NODE_ENV === 'development' && process.env.SKIP_AUTH === 'true') {
+  if (process.env.NODE_ENV === "development" && process.env.SKIP_AUTH === "true") {
     // Use a test user ID for development
-    req.userId = process.env.TEST_USER_ID || 'test-user-123';
-    req.userEmail = 'test@example.com';
+    req.userId = process.env.TEST_USER_ID || "test-user-123";
+    req.userEmail = "test@example.com";
     next();
     return;
   }

@@ -3,8 +3,8 @@ import { Topic } from '@models/Topic.js';
 import { ErrorResponse } from '$types/common.types.js';
 
 /**
- * GET /api/subjects
- * Fetch unique subjects for authenticated user
+ * GET /api/subjects?q=geo
+ * Fetch unique subjects for authenticated user, optionally filtered by prefix
  */
 export async function getSubjects(
   req: Request,
@@ -12,11 +12,14 @@ export async function getSubjects(
 ): Promise<void> {
   try {
     const userId = req.userId; // From auth middleware
+    const q = req.query.q as string | undefined;
 
-    // Query distinct subjects for the user
-    const subjects = await Topic.distinct('subjectName', { userId });
+    const filter: Record<string, unknown> = { userId };
+    if (q) {
+      filter.subjectName = { $regex: `^${q}`, $options: 'i' };
+    }
 
-    // Sort subjects alphabetically
+    const subjects = await Topic.distinct('subjectName', filter);
     const sortedSubjects = subjects.sort((a, b) => a.localeCompare(b));
 
     // Return sorted list of subjects

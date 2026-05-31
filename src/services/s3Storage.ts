@@ -171,6 +171,35 @@ export async function saveExtractedContent(userId: string, topicId: string, cont
 }
 
 /**
+ * Saves extracted content to S3 at a custom path.
+ */
+export async function saveExtractedContentAtPath(userId: string, topicId: string, path: string, content: string): Promise<string> {
+  const s3Path = `${userId}/${topicId}/extracted/${path}`;
+  validateS3Path(s3Path);
+
+  if (!content || typeof content !== "string") {
+    throw new S3StorageError(S3ErrorCode.UPLOAD_FAILED, "Content must be a non-empty string");
+  }
+
+  await retryOperation(
+    async () => {
+      const command = new PutObjectCommand({
+        Bucket: S3_BUCKET_NAME,
+        Key: s3Path,
+        Body: content,
+        ContentType: "text/markdown",
+        Metadata: { userId, topicId, uploadedAt: new Date().toISOString() },
+      });
+      await s3Client.send(command);
+    },
+    S3ErrorCode.UPLOAD_FAILED,
+    `Failed to upload content to S3 at path: ${s3Path}`,
+  );
+
+  return s3Path;
+}
+
+/**
  * Retrieves extracted content from S3.
  * Validates that the path starts with the userId for security.
  *
@@ -273,6 +302,44 @@ export async function fileExists(s3Path: string): Promise<boolean> {
     console.error(`Error checking file existence for ${s3Path}:`, error);
     return false;
   }
+}
+
+/**
+ * Lists and retrieves all extracted content files for a topic.
+ * Path format: {userId}/{topicId}/extracted/
+ *
+ * @param userId - Cognito user ID
+ * @param topicId - MongoDB ObjectId of the topic
+ * @returns Combined extracted content as a single string
+ */
+export async function getAllExtractedContent(userId: string, topicId: string): Promise<string> {
+  const prefix = `${userId}/${topicId}/extracted/`;
+
+  const listCommand = new ListObjectsV2Command({
+    Bucket: S3_BUCKET_NAME,
+    Prefix: prefix,
+  });
+  const listResponse = await s3Client.send(listCommand);
+
+  if (!listResponse.Contents || listResponse.Contents.length === 0) {
+    return "";
+  }
+
+  const contents: string[] = [];
+  for (const obj of listResponse.Contents) {
+    if (!obj.Key) continue;
+    try {
+      const getCommand = new GetObjectCommand({ Bucket: S3_BUCKET_NAME, Key: obj.Key });
+      const response = await s3Client.send(getCommand);
+      const text = await response.Body!.transformToString();
+      const fileName = obj.Key.replace(prefix, "");
+      contents.push(`\n### ${fileName}\n${text}`);
+    } catch (error) {
+      console.error(`Failed to retrieve ${obj.Key}:`, error);
+    }
+  }
+
+  return contents.join("\n");
 }
 
 /**

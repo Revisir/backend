@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { Topic } from "@models/Topic.js";
 import { calculateNextReview } from "@services/sm2Algorithm.js";
 import { generatePresignedUploadUrl } from "@services/s3Storage.js";
+import { invokeUrlProcessor } from "@services/lambdaInvoker.js";
 import { CreateTopicResponse } from "$types/createTopic.types.js";
 import { ErrorResponse } from "$types/common.types.js";
 import { createTopicSchema } from "@/schemas/index.js";
@@ -39,7 +40,7 @@ export async function createTopic(req: Request, res: Response): Promise<void> {
       topicName: topicName.trim(),
       subjectName: subjectName.trim(),
       description: description?.trim() || "",
-      urls: urls || [],
+      urls: urls?.map((url) => ({ url })) || [],
       dateStudied: dateStudiedParsed,
       revisionDate: sm2Result.nextRevisionDate,
       lastRevised: null,
@@ -50,6 +51,13 @@ export async function createTopic(req: Request, res: Response): Promise<void> {
     });
 
     await topic.save();
+
+    if (urls?.length) {
+      const processableUrls = urls.filter((u) => u.startsWith("http://") || u.startsWith("https://"));
+      if (processableUrls.length) {
+        invokeUrlProcessor({ topicId: topic._id.toString(), userId: req.userId!, urls: processableUrls });
+      }
+    }
 
     const uploadUrls =
       files?.map((file) => ({

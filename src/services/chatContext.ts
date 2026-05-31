@@ -1,5 +1,5 @@
 import { ITopic } from "@models/Topic.js";
-import { getExtractedContent } from "./s3Storage.js";
+import { getAllExtractedContent } from "./s3Storage.js";
 import { getLLMClient } from "./llmClient.js";
 import { PROMPTS } from "@config/prompts.js";
 
@@ -13,29 +13,14 @@ export interface ChatContextResult {
 }
 
 /**
- * Retrieves and combines extracted content from S3 for a topic.
+ * Retrieves and combines all extracted content from the topic's extracted/ folder in S3.
  *
  * @param topic - The topic document containing all topic information
  * @returns Combined study materials text
- * @throws Error if S3 content retrieval fails
  */
 export async function buildChatContext(topic: ITopic): Promise<ChatContextResult> {
-  const extractedContents: string[] = [];
-
-  for (const file of topic.files) {
-    if (file?.extractedContentUrl) {
-      try {
-        const content = await getExtractedContent(topic.userId, file.extractedContentUrl);
-        extractedContents.push(`\n### ${file.fileName}\n${content}`);
-      } catch (error) {
-        console.error(`Failed to retrieve content for file ${file.fileName}:`, error);
-        extractedContents.push(`\n### ${file.fileName}\n[Content unavailable]`);
-      }
-    }
-  }
-
-  const studyMaterials = extractedContents.length > 0 ? extractedContents.join("\n") : new Error("Atleast one Study Material Needed");
-
+  const content = await getAllExtractedContent(topic.userId, topic._id.toString());
+  const studyMaterials = content || new Error("Atleast one Study Material Needed");
   return { studyMaterials };
 }
 

@@ -1,120 +1,45 @@
-import { ITopic } from '@models/Topic.js';
-import { getExtractedContent } from './s3Storage.js';
-import { getLLMClient } from './llmClient.js';
-import { PROMPTS } from '@config/prompts.js';
+import { ITopic } from "@models/Topic.js";
+import { getAllExtractedContent } from "./s3Storage.js";
+import { getLLMClient } from "./llmClient.js";
+import { PROMPTS } from "@config/prompts.js";
 
 /**
  * Mind Map Generator
- * Generates Mermaid mind map diagrams for topics using LLM
+ * Generates MindElixir mind map data for topics using LLM
  */
 
 /**
- * Builds a prompt for generating a Mermaid mind map from topic data.
- * Retrieves extracted content from S3 and formats it with topic information.
- * 
+ * Builds a prompt for generating a MindElixir mind map from topic data.
+ * Retrieves all extracted content from the topic's extracted/ folder in S3.
+ *
  * @param topic - The topic document containing all topic information
  * @returns Formatted prompt for mind map generation
- * @throws Error if S3 content retrieval fails
  */
 export async function buildMindMapPrompt(topic: ITopic): Promise<string> {
-  // Retrieve all extracted content from S3
-  const extractedContents: string[] = [];
-  
-  for (const file of topic.files) {
-    try {
-      const content = await getExtractedContent(topic.userId, file.s3Path);
-      extractedContents.push(`\n### ${file.fileName}\n${content}`);
-    } catch (error) {
-      console.error(`Failed to retrieve content for file ${file.fileName}:`, error);
-      // Continue with other files even if one fails
-      extractedContents.push(`\n### ${file.fileName}\n[Content unavailable]`);
-    }
-  }
-
-  // Combine all extracted content
-  const studyMaterials = extractedContents.length > 0
-    ? extractedContents.join('\n')
-    : '[No study materials attached]';
-
-  return PROMPTS.mindMap.generate(topic, studyMaterials);
+  const studyMaterials = await getAllExtractedContent(topic.userId, topic._id.toString());
+  const materials = studyMaterials || "[No study materials attached]";
+  return PROMPTS.mindMap.generate(topic, materials);
 }
 
 /**
- * Generates a Mermaid mind map for a topic using LLM.
+ * Generates a MindElixir mind map for a topic using LLM.
  * Retrieves topic content from S3, sends to LLM, and validates the result.
- * 
+ *
  * @param topic - The topic document to generate a mind map for
- * @returns Mermaid diagram syntax as a string
- * @throws Error if LLM fails or returns invalid Mermaid syntax
+ * @returns MindElixir node data as a JSON string
+ * @throws Error if LLM fails or returns invalid JSON
  */
 export async function generateMindMap(topic: ITopic): Promise<string> {
-  // Build the mind map generation prompt
   const prompt = await buildMindMapPrompt(topic);
+  console.log("MindMap prompt", prompt);
 
-  // Send to LLM
   const llmClient = getLLMClient();
   const response = await llmClient.sendTextPrompt(prompt);
 
-  // Extract and validate Mermaid syntax
-  const mermaidCode = extractMermaidCode(response);
-  validateMermaidSyntax(mermaidCode);
-
-  return mermaidCode;
-}
-
-/**
- * Extracts Mermaid code from LLM response.
- * Handles various response formats including code blocks.
- * 
- * @param response - The LLM response text
- * @returns Extracted Mermaid code
- */
-function extractMermaidCode(response: string): string {
-  // Remove leading/trailing whitespace
-  let code = response.trim();
-
-  // Remove markdown code blocks if present
-  // Pattern: ```mermaid ... ``` or ``` ... ```
-  const codeBlockPattern = /```(?:mermaid)?\s*([\s\S]*?)```/;
-  const match = code.match(codeBlockPattern);
-  
-  if (match && match[1]) {
-    code = match[1].trim();
+  try {
+    JSON.parse(response);
+    return response;
+  } catch (error) {
+    throw new Error("Invlaid Elixir mind map");
   }
-
-  return code;
-}
-
-/**
- * Validates Mermaid mind map syntax.
- * Checks for required elements and basic structure.
- * 
- * @param mermaidCode - The Mermaid code to validate
- * @throws Error if syntax is invalid
- */
-function validateMermaidSyntax(mermaidCode: string): void {
-  // Check if code is empty
-  if (!mermaidCode || mermaidCode.length === 0) {
-    throw new Error('Mermaid code is empty');
-  }
-
-  // Check if it starts with 'mindmap'
-  const lines = mermaidCode.split('\n').map(line => line.trim()).filter(line => line.length > 0);
-  
-  if (lines.length === 0) {
-    throw new Error('Mermaid code contains no content');
-  }
-
-  if (!lines[0].toLowerCase().startsWith('mindmap')) {
-    throw new Error('Mermaid code must start with "mindmap"');
-  }
-
-  // Check if it has a root node
-  const hasRoot = lines.some(line => line.includes('root('));
-  
-  if (!hasRoot) {
-    throw new Error('Mermaid mind map must contain a root node');
-  }
-
-  // Basic validation passed
 }
