@@ -29,7 +29,7 @@ async function extractWithTavily(url: string): Promise<string | null> {
   const tvly = tavily({ apiKey: process.env.TAVILY_API_KEY! });
   const response = await tvly.extract([url]);
   const result = response.results?.[0];
-  return result?.rawContent || result?.text || null;
+  return result?.rawContent || (result as any)?.text || null;
 }
 
 async function extractWithJina(url: string): Promise<string | null> {
@@ -40,11 +40,11 @@ async function extractWithJina(url: string): Promise<string | null> {
       "X-Return-Format": "markdown",
     },
   });
-  return response.data || null;
+  return (response.data as string) || null;
 }
 
 async function extractWithExa(url: string): Promise<string | null> {
-  const exa = new Exa(process.env.EXA_API_KEY!);
+  const exa = (Exa as any).default ? new (Exa as any).default(process.env.EXA_API_KEY!) : new (Exa as any)(process.env.EXA_API_KEY!);
   const result = await exa.getContents([url], {
     summary: { query: PROMPTS.extraction.url },
   });

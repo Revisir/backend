@@ -18,7 +18,7 @@ import { PROMPTS } from "@config/prompts.js";
 export async function buildMindMapPrompt(topic: ITopic): Promise<string> {
   const studyMaterials = await getAllExtractedContent(topic.userId, topic._id.toString());
   const materials = studyMaterials || "[No study materials attached]";
-  return PROMPTS.mindMap.generate(topic, materials);
+  return PROMPTS.mindMap.generate(materials);
 }
 
 /**

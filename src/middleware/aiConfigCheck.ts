@@ -5,7 +5,7 @@ import { ErrorResponse } from "$types/common.types.js";
  * Middleware to check if AI/LLM is configured (API keys present).
  * Returns a common error response if not, so the frontend can handle it uniformly.
  */
-export function requireAIConfig(req: Request, res: Response, next: NextFunction): void {
+export function requireAIConfig(_req: Request, res: Response, next: NextFunction): void {
   const provider = process.env.LLM_PROVIDER || "google";
   const apiKey = process.env.LLM_API_KEY;
 

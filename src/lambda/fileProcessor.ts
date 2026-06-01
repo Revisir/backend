@@ -4,7 +4,7 @@ import { S3Event, Context } from "aws-lambda";
 import { GetObjectCommand, PutObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import mongoose from "mongoose";
 import { Topic, IAttachedFile } from "@models/Topic.js";
-import { extractContent, FileType } from "@services/fileExtractor.js";
+import { extractContent } from "@services/fileExtractor.js";
 import { s3Client, S3_BUCKET_NAME, minioClient, useMinio } from "@/config/s3.js";
 import { ALLOWED_CONTENT_TYPES, MAX_FILE_SIZE } from "@/config/fileConstants.js";
 
@@ -31,7 +31,7 @@ async function connectDB() {
   isConnected = true;
 }
 
-function getFileType(contentType: string): FileType {
+function getFileType(contentType: string): "image" | "pdf" | "text" {
   if (contentType.startsWith("image/")) return "image";
   if (contentType === "application/pdf") return "pdf";
   return "text";
@@ -125,7 +125,7 @@ async function processFile(bucket: string, key: string) {
 /**
  * AWS Lambda handler - triggered by S3 event notifications
  */
-export const handler = async (event: S3Event, context: Context) => {
+export const handler = async (event: S3Event, _context: Context) => {
   console.log("Processing S3 event:", JSON.stringify(event, null, 2));
 
   for (const record of event.Records) {
@@ -181,7 +181,7 @@ export async function startMinioListener() {
 
   poller.start();
 
-  poller.on("error", (error: Error) => {
+  poller.on("error", (error: unknown) => {
     console.error("MinIO listener error:", error);
     // Restart listener after a delay
     setTimeout(() => {

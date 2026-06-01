@@ -1,6 +1,6 @@
-import { Topic } from "../models/Topic";
-import { RevisionRecord } from "../models/RevisionRecord";
-import { connectDatabase } from "@/config/database";
+import { Topic } from "../models/Topic.js";
+import { RevisionRecord } from "../models/RevisionRecord.js";
+import { connectDatabase } from "@/config/database.js";
 
 const SAMPLE_USER_ID = "test-user-530";
 

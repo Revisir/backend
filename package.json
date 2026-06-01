@@ -1,13 +1,15 @@
 {
   "name": "reviser_node_service",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx --watch src/index.ts ",
-    "build": "tsc && tsc-alias",
+    "build": "tsc --noEmit && tsx esbuild.config.ts",
     "start": "node dist/index.js",
+    "docker:build:be": "docker build . -t rjnishant530/revisir-be:%npm_package_version% -t rjnishant530/revisir-be:latest",
+    "docker:build:fp": "docker build . -f Dockerfile.minio-poller -t rjnishant530/revisir-fp:%npm_package_version% -t rjnishant530/revisir-fp:latest",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage"
@@ -49,6 +51,7 @@
     "@types/node": "^25.3.0",
     "@types/supertest": "^6.0.3",
     "aws-sdk-client-mock": "^4.1.0",
+    "esbuild": "^0.28.0",
     "jest": "^30.2.0",
     "nodemon": "^3.1.14",
     "supertest": "^7.2.2",
