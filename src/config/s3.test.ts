@@ -13,9 +13,9 @@ describe('S3 Client Configuration', () => {
     process.env = originalEnv;
   });
 
-  describe('Production Configuration (AWS S3)', () => {
-    it('should create S3 client with AWS credentials in production', () => {
-      process.env.NODE_ENV = 'production';
+  describe('AWS S3 Configuration', () => {
+    it('should create S3 client with AWS credentials when BUCKET_TYPE is not seaweedfs', () => {
+      delete process.env.BUCKET_TYPE;
       process.env.AWS_REGION = 'us-west-2';
       process.env.AWS_ACCESS_KEY_ID = 'test-access-key';
       process.env.AWS_SECRET_ACCESS_KEY = 'test-secret-key';
@@ -27,7 +27,7 @@ describe('S3 Client Configuration', () => {
     });
 
     it('should use default region if AWS_REGION not provided', () => {
-      process.env.NODE_ENV = 'production';
+      delete process.env.BUCKET_TYPE;
       process.env.AWS_ACCESS_KEY_ID = 'test-access-key';
       process.env.AWS_SECRET_ACCESS_KEY = 'test-secret-key';
       delete process.env.AWS_REGION;
@@ -38,7 +38,7 @@ describe('S3 Client Configuration', () => {
     });
 
     it('should handle missing AWS credentials gracefully', () => {
-      process.env.NODE_ENV = 'production';
+      delete process.env.BUCKET_TYPE;
       delete process.env.AWS_ACCESS_KEY_ID;
       delete process.env.AWS_SECRET_ACCESS_KEY;
 
@@ -48,52 +48,85 @@ describe('S3 Client Configuration', () => {
     });
   });
 
-  describe('Development Configuration (MinIO)', () => {
-    it('should create S3 client with MinIO configuration in development', () => {
-      process.env.NODE_ENV = 'development';
-      process.env.MINIO_ENDPOINT = 'localhost';
-      process.env.MINIO_PORT = '9000';
-      process.env.MINIO_USE_SSL = 'false';
-      process.env.MINIO_ACCESS_KEY = 'minioadmin';
-      process.env.MINIO_SECRET_KEY = 'minioadmin';
+  describe('SeaweedFS Configuration', () => {
+    // `useSeaweedFS` is read when the module first loads, so BUCKET_TYPE has to
+    // be set before a fresh require — the createS3Client imported at the top of
+    // this file is bound to whatever the env said at import time.
+    function freshClient(): S3Client {
+      jest.resetModules();
+      const { createS3Client: create } = require('./s3');
+      return create();
+    }
 
-      const client = createS3Client();
+    it('should create S3 client with SeaweedFS configuration', () => {
+      process.env.BUCKET_TYPE = 'seaweedfs';
+      process.env.S3_ENDPOINT = 'localhost';
+      process.env.S3_PORT = '8333';
+      process.env.S3_USE_SSL = 'false';
+      process.env.S3_ACCESS_KEY = 'seaweedfsadmin';
+      process.env.S3_SECRET_KEY = 'seaweedfssecret';
 
-      expect(client).toBeInstanceOf(S3Client);
+      const client = freshClient();
+
+      // Not toBeInstanceOf: resetModules hands back a fresh copy of the SDK, so
+      // its S3Client is a different class object than the one imported above.
+      expect(client.constructor.name).toBe('S3Client');
       expect(client.config.region).toBeDefined();
     });
 
-    it('should use default MinIO settings if not provided', () => {
-      process.env.NODE_ENV = 'development';
-      delete process.env.MINIO_ENDPOINT;
-      delete process.env.MINIO_PORT;
-      delete process.env.MINIO_USE_SSL;
-      delete process.env.MINIO_ACCESS_KEY;
-      delete process.env.MINIO_SECRET_KEY;
+    it('should use default SeaweedFS settings if not provided', async () => {
+      process.env.BUCKET_TYPE = 'seaweedfs';
+      delete process.env.S3_ENDPOINT;
+      delete process.env.S3_PORT;
+      delete process.env.S3_USE_SSL;
+      delete process.env.S3_ACCESS_KEY;
+      delete process.env.S3_SECRET_KEY;
 
-      const client = createS3Client();
+      const endpoint = await freshClient().config.endpoint!();
 
-      expect(client).toBeInstanceOf(S3Client);
+      expect(endpoint.hostname).toBe('localhost');
+      expect(endpoint.port).toBe(8333);
     });
 
-    it('should configure forcePathStyle for MinIO compatibility', () => {
-      process.env.NODE_ENV = 'development';
+    it('should configure forcePathStyle for SeaweedFS compatibility', () => {
+      process.env.BUCKET_TYPE = 'seaweedfs';
 
-      const client = createS3Client();
+      const client = freshClient();
 
-      expect(client).toBeInstanceOf(S3Client);
-      // forcePathStyle is set in the config
+      expect(client.config.forcePathStyle).toBe(true);
     });
 
-    it('should support SSL for MinIO when enabled', () => {
-      process.env.NODE_ENV = 'development';
-      process.env.MINIO_USE_SSL = 'true';
-      process.env.MINIO_ENDPOINT = 'minio.example.com';
-      process.env.MINIO_PORT = '9000';
+    it('should resolve the endpoint from S3_ENDPOINT and S3_PORT', async () => {
+      process.env.BUCKET_TYPE = 'seaweedfs';
+      process.env.S3_ENDPOINT = 'seaweedfs';
+      process.env.S3_PORT = '8333';
+      process.env.S3_USE_SSL = 'false';
 
-      const client = createS3Client();
+      const endpoint = await freshClient().config.endpoint!();
 
-      expect(client).toBeInstanceOf(S3Client);
+      expect(endpoint.protocol).toBe('http:');
+      expect(endpoint.hostname).toBe('seaweedfs');
+      expect(endpoint.port).toBe(8333);
+    });
+
+    it('should support SSL for SeaweedFS when enabled', async () => {
+      process.env.BUCKET_TYPE = 'seaweedfs';
+      process.env.S3_USE_SSL = 'true';
+      process.env.S3_ENDPOINT = 'seaweedfs.example.com';
+      process.env.S3_PORT = '8333';
+
+      const endpoint = await freshClient().config.endpoint!();
+
+      expect(endpoint.protocol).toBe('https:');
+      expect(endpoint.hostname).toBe('seaweedfs.example.com');
+    });
+
+    it('should not calculate request checksums, which SeaweedFS reads from the presigned query', async () => {
+      process.env.BUCKET_TYPE = 'seaweedfs';
+
+      const client = freshClient();
+
+      await expect(client.config.requestChecksumCalculation()).resolves.toBe('WHEN_REQUIRED');
     });
   });
 
@@ -118,33 +151,32 @@ describe('S3 Client Configuration', () => {
     });
   });
 
-  describe('Environment-based Configuration Switching', () => {
-    it('should switch to AWS S3 when NODE_ENV is production', () => {
-      process.env.NODE_ENV = 'production';
-      process.env.AWS_ACCESS_KEY_ID = 'prod-key';
-      process.env.AWS_SECRET_ACCESS_KEY = 'prod-secret';
+  describe('BUCKET_TYPE-based Configuration Switching', () => {
+    it('should switch to SeaweedFS when BUCKET_TYPE is seaweedfs', () => {
+      process.env.BUCKET_TYPE = 'seaweedfs';
 
-      const client = createS3Client();
+      jest.resetModules();
+      const { useSeaweedFS } = require('./s3');
 
-      expect(client).toBeInstanceOf(S3Client);
-      // In production, endpoint should not be set (uses AWS default)
+      expect(useSeaweedFS).toBe(true);
     });
 
-    it('should switch to MinIO when NODE_ENV is not production', () => {
-      process.env.NODE_ENV = 'development';
+    it('should switch to AWS S3 for any other BUCKET_TYPE', () => {
+      process.env.BUCKET_TYPE = 's3';
 
-      const client = createS3Client();
+      jest.resetModules();
+      const { useSeaweedFS } = require('./s3');
 
-      expect(client).toBeInstanceOf(S3Client);
-      // In development, endpoint should be set to MinIO
+      expect(useSeaweedFS).toBe(false);
     });
 
-    it('should default to MinIO when NODE_ENV is not set', () => {
-      delete process.env.NODE_ENV;
+    it('should default to AWS S3 when BUCKET_TYPE is not set', () => {
+      delete process.env.BUCKET_TYPE;
 
-      const client = createS3Client();
+      jest.resetModules();
+      const { useSeaweedFS } = require('./s3');
 
-      expect(client).toBeInstanceOf(S3Client);
+      expect(useSeaweedFS).toBe(false);
     });
   });
 });

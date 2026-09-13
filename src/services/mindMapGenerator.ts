@@ -2,6 +2,9 @@ import { ITopic } from "@models/Topic.js";
 import { getAllExtractedContent } from "./s3Storage.js";
 import { getLLMClient } from "./llmClient.js";
 import { PROMPTS } from "@config/prompts.js";
+import { logger } from "@config/logger.js";
+
+const log = logger.child({ module: "mindMapGenerator" });
 
 /**
  * Mind Map Generator
@@ -31,7 +34,7 @@ export async function buildMindMapPrompt(topic: ITopic): Promise<string> {
  */
 export async function generateMindMap(topic: ITopic): Promise<string> {
   const prompt = await buildMindMapPrompt(topic);
-  console.log("MindMap prompt", prompt);
+  log.debug({ topicId: topic._id }, "MindMap prompt built");
 
   const llmClient = getLLMClient();
   const response = await llmClient.sendTextPrompt(prompt);

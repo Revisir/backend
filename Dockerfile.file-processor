@@ -10,12 +10,13 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --prod --frozen-l
 
 FROM base AS build
 RUN npm i -g tsx
-RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile --ignore-scripts
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile 
 RUN pnpm run build
 
 FROM node:24-alpine
 WORKDIR /app
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist/file* ./
-ENV BUCKET_TYPE=minio
+ENV BUCKET_TYPE=seaweedfs
+ENV START_FILE_CONSUMER=true
 ENTRYPOINT [ "node", "fileProcessor.js" ]

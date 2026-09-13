@@ -6,6 +6,9 @@ import { generateQuestions, evaluateAnswer } from "@services/questionAgent.js";
 import { ErrorResponse } from "$types/common.types.js";
 import { startChatSessionSchema, sendChatMessageSchema, completeChatSessionSchema } from "@/schemas/index.js";
 import { recordRevision } from "@controllers/topicController.js";
+import { logger } from "@config/logger.js";
+
+const log = logger.child({ module: "chatController" });
 
 /**
  * POST /api/chat/start
@@ -70,7 +73,7 @@ export async function startChatSession(req: Request, res: Response): Promise<voi
       totalQuestions: questions.length,
     });
   } catch (error) {
-    console.error("Error starting chat session:", error);
+    log.error({ err: error }, "Error starting chat session");
 
     if (error instanceof Error) {
       if (error.message.includes("S3") || error.message.includes("retrieve")) {
@@ -156,7 +159,7 @@ export async function sendChatMessage(req: Request, res: Response): Promise<void
       totalQuestions: chatSession.questions.length,
     });
   } catch (error) {
-    console.error("Error sending chat message:", error);
+    log.error({ err: error }, "Error sending chat message");
 
     if (error instanceof Error && (error.message.includes("LLM") || error.message.includes("timeout"))) {
       res.status(500).json({
@@ -206,11 +209,11 @@ export async function completeChatSession(req: Request, res: Response): Promise<
     // LLM evaluates session quality from conversation history
     const llmQuality = await assessStudentPerformance(chatSession.messages);
 
-    console.log({ userId: req.userId!, topic, userQuality, llmQuality });
+    log.info({ userId: req.userId!, topicId: topic._id, userQuality, llmQuality }, "Recording revision");
 
     const result = await recordRevision({ userId: req.userId!, topic, userQuality, llmQuality });
 
-    console.log({ result });
+    log.info({ result }, "Revision recorded");
 
     chatSession.completedAt = new Date();
     chatSession.active = false;
@@ -221,7 +224,7 @@ export async function completeChatSession(req: Request, res: Response): Promise<
       finalQuality: result.finalQuality,
     });
   } catch (error) {
-    console.error("Error completing chat session:", error);
+    log.error({ err: error }, "Error completing chat session");
 
     res.status(500).json({
       error: { code: "INTERNAL_SERVER_ERROR", message: "Failed to complete chat session", details: error instanceof Error ? error.message : "Unknown error" },

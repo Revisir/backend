@@ -10,12 +10,15 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --prod --frozen-l
 
 FROM base AS build
 RUN npm i -g tsx
-RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile --ignore-scripts
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile 
 RUN pnpm run build
 
 FROM node:24-alpine
 WORKDIR /app
 COPY --from=prod-deps /app/node_modules ./node_modules
-COPY --from=build /app/dist/index.* ./dist/
+COPY --from=build /app/dist/index.js ./dist/
+COPY --from=build /app/dist/index.js.map ./dist/
+COPY --from=build /app/dist/instrumentation.js ./dist/
+COPY --from=build /app/dist/instrumentation.js.map ./dist/
 EXPOSE 5000
-CMD [ "pnpm", "start" ]
+CMD [ "node", "--enable-source-maps", "--import", "./dist/instrumentation.js", "dist/index.js" ]

@@ -1,6 +1,6 @@
 import { getLLMClient } from './llmClient.js';
 import { PROMPTS } from '@config/prompts.js';
-import axios from 'axios';
+import { readUrlForStudy } from './jinaReader.js';
 
 /**
  * File Content Extractor Service
@@ -86,7 +86,10 @@ export async function extractFromPDF(
 }
 
 /**
- * Process a URL and extract content using LLM
+ * Process a URL and extract content using Jina Reader.
+ * Jina Reader converts any URL to clean, LLM-friendly markdown
+ * using headless Chrome rendering — handles SPAs, JS-heavy pages, and PDFs.
+ *
  * @param url - The URL to extract content from
  * @returns Extracted content as markdown text
  */
@@ -94,24 +97,19 @@ export async function extractFromURL(
   url: string
 ): Promise<ExtractionResult> {
   try {
-    // First, fetch the webpage content
-    const response = await axios.get(url, {
-      timeout: 10000, // 10 second timeout
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; RevisionStudyBot/1.0)'
-      }
-    });
+    const result = await readUrlForStudy(url);
 
-    const htmlContent = response.data;
-    
-    // Send the HTML content to LLM for extraction
-    const llmClient = getLLMClient();
-    const prompt = `${PROMPTS.extraction.url}\n\nHTML Content:\n${htmlContent}`;
-
-    const content = await llmClient.sendTextPrompt(prompt);
+    if (!result.success) {
+      return {
+        content: '',
+        fileType: 'url',
+        success: false,
+        error: `Jina Reader extraction failed: ${result.error}`
+      };
+    }
 
     return {
-      content,
+      content: result.content,
       fileType: 'url',
       success: true
     };

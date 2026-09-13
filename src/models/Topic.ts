@@ -12,6 +12,8 @@ export interface IAttachedFile {
   s3Bucket: string;
   extractedContentUrl?: string;
   processedAt: Date;
+  processingStatus: "pending" | "processing" | "completed" | "failed";
+  errorReason?: string;
 }
 
 /**
@@ -22,6 +24,8 @@ export interface IAttachedUrl {
   url: string;
   extractedContentPath?: string;
   processedAt?: Date;
+  processingStatus: "pending" | "processing" | "completed" | "failed";
+  errorReason?: string;
 }
 
 /**
@@ -46,6 +50,7 @@ export interface ITopic extends Document {
   createdAt: Date;
   updatedAt: Date;
   isDue: boolean; // virtual field
+  isProcessingComplete: boolean; // virtual field
 }
 
 /**
@@ -81,6 +86,16 @@ const AttachedFileSchema = new Schema<IAttachedFile>({
     type: Date,
     default: Date.now,
   },
+  processingStatus: {
+    type: String,
+    enum: ["pending", "processing", "completed", "failed"],
+    default: "pending",
+  },
+  errorReason: {
+    type: String,
+    maxlength: 500,
+    default: null,
+  },
 });
 
 /**
@@ -97,6 +112,16 @@ const AttachedUrlSchema = new Schema<IAttachedUrl>({
   },
   processedAt: {
     type: Date,
+    default: null,
+  },
+  processingStatus: {
+    type: String,
+    enum: ["pending", "processing", "completed", "failed"],
+    default: "pending",
+  },
+  errorReason: {
+    type: String,
+    maxlength: 500,
     default: null,
   },
 });
@@ -181,6 +206,21 @@ TopicSchema.virtual("isDue").get(function (this: ITopic) {
 });
 
 /**
+ * Virtual field for isProcessingComplete calculation
+ * Returns true when all URLs and files have status "completed" or "failed"
+ * Also returns true when both arrays are empty
+ */
+TopicSchema.virtual("isProcessingComplete").get(function (this: ITopic) {
+  const allUrls = this.urls.every(
+    (u) => u.processingStatus === "completed" || u.processingStatus === "failed"
+  );
+  const allFiles = this.files.every(
+    (f) => f.processingStatus === "completed" || f.processingStatus === "failed"
+  );
+  return allUrls && allFiles;
+});
+
+/**
  * Ensure virtuals are included when converting to JSON
  */
 TopicSchema.set("toJSON", { virtuals: true });
@@ -192,6 +232,40 @@ TopicSchema.set("toObject", { virtuals: true });
 TopicSchema.index({ userId: 1, revisionDate: 1 }); // for user-specific due topics queries
 TopicSchema.index({ userId: 1, subjectName: 1 }); // for user-specific subject filtering
 TopicSchema.index({ userId: 1, createdAt: -1 }); // for user-specific recent topics
+
+/**
+ * Truncates an error reason string to at most 500 characters.
+ * Application-level truncation ensures errorReason fits the maxlength constraint
+ * before storing in a URL or file subdocument.
+ */
+export function truncateErrorReason(reason: string): string {
+  return reason.length > 500 ? reason.substring(0, 500) : reason;
+}
+
+/**
+ * Valid processing status transitions.
+ * Only these from → to transitions are allowed:
+ * - pending → processing
+ * - processing → completed
+ * - processing → failed
+ */
+const VALID_TRANSITIONS: Record<string, string[]> = {
+  pending: ["processing"],
+  processing: ["completed", "failed"],
+  completed: [],
+  failed: [],
+};
+
+/**
+ * Validates whether a processing status transition is allowed.
+ * Returns true only for: pending→processing, processing→completed, processing→failed.
+ */
+export function isValidStatusTransition(
+  from: "pending" | "processing" | "completed" | "failed",
+  to: "pending" | "processing" | "completed" | "failed"
+): boolean {
+  return VALID_TRANSITIONS[from]?.includes(to) ?? false;
+}
 
 /**
  * Topic model

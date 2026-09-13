@@ -1,6 +1,9 @@
 import { Request, Response } from 'express';
 import { Topic } from '@models/Topic.js';
 import { ErrorResponse } from '$types/common.types.js';
+import { logger } from "@config/logger.js";
+
+const log = logger.child({ module: "subjectController" });
 
 /**
  * GET /api/subjects?q=geo
@@ -25,7 +28,7 @@ export async function getSubjects(
     // Return sorted list of subjects
     res.status(200).json({ subjects: sortedSubjects });
   } catch (error) {
-    console.error('Error fetching subjects:', error);
+    log.error({ err: error }, "Error fetching subjects");
 
     // Generic error response
     res.status(500).json({

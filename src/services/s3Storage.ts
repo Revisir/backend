@@ -1,7 +1,28 @@
 import { PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand, ListObjectsV2Command, DeleteObjectsCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { s3Client, S3_BUCKET_NAME } from "../config/s3.js";
-import { ALLOWED_CONTENT_TYPES, MAX_FILE_SIZE } from "../config/fileConstants.js";
+import { s3Client, S3_BUCKET_NAME, useSeaweedFS } from "@config/s3.js";
+import { ALLOWED_CONTENT_TYPES, MAX_FILE_SIZE } from "@config/fileConstants.js";
+import { logger } from "@config/logger.js";
+
+const log = logger.child({ module: "s3Storage" });
+
+/**
+ * Rewrites internal SeaweedFS URLs to the public-facing URL for browser access.
+ *
+ * Presigned URLs are signed against the in-cluster origin, so the reverse proxy
+ * fronting S3_PUBLIC_URL must restore that Host upstream or the signature will
+ * not verify.
+ */
+function toPublicUrl(url: string): string {
+  if (!useSeaweedFS) return url;
+  const publicUrl = process.env.S3_PUBLIC_URL;
+  if (!publicUrl) return url;
+  const endpoint = process.env.S3_ENDPOINT || "localhost";
+  const port = process.env.S3_PORT || "8333";
+  const useSSL = process.env.S3_USE_SSL === "true";
+  const internalOrigin = `http${useSSL ? "s" : ""}://${endpoint}:${port}`;
+  return url.replace(internalOrigin, publicUrl);
+}
 
 /**
  * Error codes for S3 operations
@@ -53,7 +74,7 @@ async function retryOperation<T>(operation: () => Promise<T>, errorCode: S3Error
       return await operation();
     } catch (error) {
       lastError = error as Error;
-      console.error(`S3 operation attempt ${attempt + 1}/${RETRY_CONFIG.maxRetries} failed:`, error);
+      log.error({ err: error, attempt: attempt + 1, maxRetries: RETRY_CONFIG.maxRetries }, "S3 operation attempt failed");
 
       // Don't retry on the last attempt
       if (attempt < RETRY_CONFIG.maxRetries - 1) {
@@ -75,14 +96,16 @@ function validateS3Path(s3Path: string): void {
     throw new S3StorageError(S3ErrorCode.INVALID_PATH, "S3 path must be a non-empty string");
   }
 
-  // Check for invalid characters or patterns
-  if (s3Path.includes("..") || s3Path.startsWith("/")) {
+  // Check for invalid characters or patterns. An empty segment ("a//b") means a
+  // caller passed an empty userId/topicId/fileName, which would otherwise
+  // silently write to a path no lookup can match.
+  if (s3Path.includes("..") || s3Path.startsWith("/") || s3Path.includes("//")) {
     throw new S3StorageError(S3ErrorCode.INVALID_PATH, "S3 path contains invalid characters or patterns");
   }
 }
 
 /**
- * Generates a presigned URL for uploading files to S3/MinIO.
+ * Generates a presigned URL for uploading files to S3/SeaweedFS.
  * Path format: {userId}/{topicId}/files/{fileName}
  *
  * @param userId - Cognito user ID
@@ -120,8 +143,8 @@ export async function generatePresignedUploadUrl(userId: string, topicId: string
       expiresIn,
       signableHeaders: new Set(["content-length"]),
     });
-    console.log(`Generated presigned upload URL for: ${s3Path}`);
-    return url;
+    log.info({ s3Path }, "Generated presigned upload URL");
+    return toPublicUrl(url);
   } catch (error) {
     throw new S3StorageError(S3ErrorCode.ACCESS_ERROR, `Failed to generate presigned upload URL for: ${s3Path}`, error as Error);
   }
@@ -166,7 +189,7 @@ export async function saveExtractedContent(userId: string, topicId: string, cont
     `Failed to upload content to S3 at path: ${s3Path}`,
   );
 
-  console.log(`Successfully saved content to S3: ${s3Path}`);
+  log.info({ s3Path }, "Successfully saved content to S3");
   return s3Path;
 }
 
@@ -240,12 +263,12 @@ export async function getExtractedContent(userId: string, s3Path: string): Promi
     `Failed to retrieve content from S3 at path: ${s3Path}`,
   );
 
-  console.log(`Successfully retrieved content from S3: ${s3Path}`);
+  log.info({ s3Path }, "Successfully retrieved content from S3");
   return content;
 }
 
 /**
- * Generates a signed URL for frontend access to S3/MinIO content.
+ * Generates a signed URL for frontend access to S3/SeaweedFS content.
  * URL expires after 1 hour (3600 seconds).
  *
  * @param s3Path - S3 path to the content file
@@ -268,8 +291,8 @@ export async function getSignedContentUrl(s3Path: string, expiresIn: number = 36
       ResponseContentDisposition: "inline",
     });
     const url = await getSignedUrl(s3Client, command, { expiresIn });
-    console.log(`Generated signed URL for S3 path: ${s3Path}`);
-    return url;
+    log.info({ s3Path }, "Generated signed URL for S3 path");
+    return toPublicUrl(url);
   } catch (error) {
     throw new S3StorageError(S3ErrorCode.ACCESS_ERROR, `Failed to generate signed URL for path: ${s3Path}`, error as Error);
   }
@@ -299,7 +322,7 @@ export async function fileExists(s3Path: string): Promise<boolean> {
       return false;
     }
     // For other errors, log and return false
-    console.error(`Error checking file existence for ${s3Path}:`, error);
+    log.error({ err: error, s3Path }, "Error checking file existence");
     return false;
   }
 }
@@ -335,7 +358,7 @@ export async function getAllExtractedContent(userId: string, topicId: string): P
       const fileName = obj.Key.replace(prefix, "");
       contents.push(`\n### ${fileName}\n${text}`);
     } catch (error) {
-      console.error(`Failed to retrieve ${obj.Key}:`, error);
+      log.error({ err: error, key: obj.Key }, "Failed to retrieve object");
     }
   }
 
@@ -343,19 +366,19 @@ export async function getAllExtractedContent(userId: string, topicId: string): P
 }
 
 /**
- * Deletes a file from S3/MinIO by its full path
+ * Deletes a file from S3/SeaweedFS by its full path
  */
 export async function deleteByPath(s3Path: string): Promise<void> {
   validateS3Path(s3Path);
   try {
     await s3Client.send(new DeleteObjectCommand({ Bucket: S3_BUCKET_NAME, Key: s3Path }));
   } catch (error) {
-    console.error(`Error deleting ${s3Path}:`, error);
+    log.error({ err: error, s3Path }, "Error deleting file by path");
   }
 }
 
 /**
- * Deletes a single file from S3/MinIO
+ * Deletes a single file from S3/SeaweedFS
  *
  * @param userId - Cognito user ID
  * @param topicId - MongoDB ObjectId of the topic
@@ -371,9 +394,9 @@ export async function deleteFile(userId: string, topicId: string, fileName: stri
       Key: s3Path,
     });
     await s3Client.send(deleteCommand);
-    console.log(`Deleted file: ${s3Path}`);
+    log.info({ s3Path }, "Deleted file");
   } catch (error) {
-    console.error(`Error deleting file ${s3Path}:`, error);
+    log.error({ err: error, s3Path }, "Error deleting file");
     throw new S3StorageError(S3ErrorCode.ACCESS_ERROR, `Failed to delete file: ${s3Path}`, error as Error);
   }
 }
@@ -395,7 +418,7 @@ export async function deleteTopicFiles(userId: string, topicId: string): Promise
     const listResponse = await s3Client.send(listCommand);
 
     if (!listResponse.Contents || listResponse.Contents.length === 0) {
-      console.log(`No files found for topic: ${prefix}`);
+      log.info({ prefix }, "No files found for topic");
       return;
     }
 
@@ -406,9 +429,9 @@ export async function deleteTopicFiles(userId: string, topicId: string): Promise
       },
     });
     await s3Client.send(deleteCommand);
-    console.log(`Deleted ${listResponse.Contents.length} files for topic: ${prefix}`);
+    log.info({ prefix, count: listResponse.Contents.length }, "Deleted files for topic");
   } catch (error) {
-    console.error(`Error deleting files for topic ${prefix}:`, error);
+    log.error({ err: error, prefix }, "Error deleting files for topic");
     throw new S3StorageError(S3ErrorCode.ACCESS_ERROR, `Failed to delete files for topic: ${prefix}`, error as Error);
   }
 }

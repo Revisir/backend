@@ -1,5 +1,8 @@
 import { Request, Response, NextFunction } from "express";
 import * as jose from "jose";
+import { logger } from "@config/logger.js";
+
+const log = logger.child({ module: "auth" });
 
 // Extend Express Request type to include user information
 declare global {
@@ -38,7 +41,7 @@ export async function authenticateToken(req: Request, res: Response, next: NextF
     jose
       .jwtVerify(token, client)
       .then(({ payload }) => {
-        console.log(payload);
+        log.debug({ sub: payload.sub }, "JWT verified");
         req.userId = payload.sub; // Cognito user ID (sub claim)
         if (payload.email) {
           req.userEmail = payload.email as string; // User email
@@ -79,7 +82,7 @@ export async function authenticateToken(req: Request, res: Response, next: NextF
         return;
       });
   } catch (error) {
-    console.error("Authentication error:", error);
+    log.error({ err: error }, "Authentication error");
     res.status(500).json({
       error: {
         code: "AUTH_ERROR",

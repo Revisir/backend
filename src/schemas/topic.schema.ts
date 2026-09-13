@@ -10,7 +10,7 @@ export const createTopicSchema = z.object({
   topicName: z.string().trim().min(1, "Topic name is required").max(200, "Topic name must not exceed 200 characters"),
   subjectName: z.string().trim().min(1, "Subject name is required").max(100, "Subject name must not exceed 100 characters"),
   description: z.string().trim().max(1000, "Description must not exceed 1000 characters").optional(),
-  urls: z.array(z.url("Each URL must be a valid URL")).min(1, "URLs list cannot be empty").optional(),
+  urls: z.array(z.url("Each URL must be a valid URL")).min(1, "URLs list cannot be empty").max(20, "Maximum 20 URLs allowed per request").optional(),
   files: z.array(fileInfoSchema).optional(),
   dateStudied: z
     .string()

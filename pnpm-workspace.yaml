@@ -1,2 +1,16 @@
-onlyBuiltDependencies:
-  - esbuild
+allowBuilds:
+  '@swc/core': true
+  dtrace-provider: true
+  esbuild: true
+  mongodb-memory-server: true
+  protobufjs: true
+  unrs-resolver: true
+minimumReleaseAgeExclude:
+  - '@ai-sdk/anthropic@3.0.88'
+  - '@ai-sdk/gateway@3.0.138'
+  - '@ai-sdk/google@3.0.85'
+  - '@ai-sdk/openai@3.0.76'
+  - '@ai-sdk/provider-utils@4.0.32'
+  - '@ai-sdk/provider@3.0.12'
+  - ai@6.0.213
+  - mongoose@9.7.3

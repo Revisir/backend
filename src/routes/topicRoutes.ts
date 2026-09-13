@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { getTopics, getTopicById, getDueTopics, getTopicHistory, generateTopicMindMap, getTopicMindMap, markTopicRevised, updateTopic, deleteTopicFile, uploadTopicFiles, deleteTopic, resetTopicProgress } from "@controllers/topicController.js";
+import { getTopics, getTopicById, getDueTopics, getTopicHistory, getForgettingCurve, generateTopicMindMap, getTopicMindMap, markTopicRevised, updateTopic, deleteTopicFile, uploadTopicFiles, deleteTopic, resetTopicProgress } from "@controllers/topicController.js";
 // import { upload } from "@middleware/upload";
 import { createTopic } from "@controllers/createTopicController.js";
 import { requireAIConfig } from "@middleware/aiConfigCheck.js";
@@ -67,8 +67,23 @@ router.get("/due", getDueTopics);
 router.get("/:id/history", getTopicHistory);
 
 /**
+ * GET /api/topics/:id/forgetting-curve
+ * Get forgetting curve data for a topic
+ *
+ * Path parameters:
+ * - id: string (MongoDB ObjectId)
+ *
+ * Response:
+ * - 200: { topicName, eFactor, interval, repetitionNumber, revisionDate, lastRevised, curvePoints, revisionMarkers }
+ * - 400: Invalid topic ID format
+ * - 404: Topic not found
+ * - 500: Server error
+ */
+router.get("/:id/forgetting-curve", getForgettingCurve);
+
+/**
  * POST /api/topics/:id/mindmap
- * Generate a Mermaid mind map for a topic
+ * Generate a  mind map for a topic
  *
  * Path parameters:
  * - id: string (MongoDB ObjectId)

@@ -3,27 +3,22 @@ import "dotenv/config";
 import { S3Event, Context } from "aws-lambda";
 import { GetObjectCommand, PutObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import mongoose from "mongoose";
-import { Topic, IAttachedFile } from "@models/Topic.js";
+import { Topic, truncateErrorReason } from "@models/Topic.js";
 import { extractContent } from "@services/fileExtractor.js";
-import { s3Client, S3_BUCKET_NAME, minioClient, useMinio } from "@/config/s3.js";
+import { parseUploadKey } from "@services/uploadKey.js";
+import { logger } from "@config/logger.js";
+import { s3Client } from "@/config/s3.js";
 import { ALLOWED_CONTENT_TYPES, MAX_FILE_SIZE } from "@/config/fileConstants.js";
+import { ConnectionManager } from "@services/rabbitmq/connectionManager.js";
+import { QueuePublisher } from "@services/rabbitmq/publisher.js";
+import { QueueConsumer, type MessageOutcome } from "@services/rabbitmq/consumer.js";
+import { RABBITMQ_CONFIG, RABBITMQ_URL } from "@config/rabbitmq.js";
+import { fileProcessingMessageSchema, type FileProcessingMessage } from "@/schemas/queue.schema.js";
+import type { ConsumeMessage } from "amqplib";
+
+const log = logger.child({ module: "fileProcessor" });
 
 let isConnected = false;
-
-const recentlyProcessed = new Map<string, number>();
-const DEDUP_TTL_MS = 10_000;
-
-function isDuplicate(key: string): boolean {
-  const now = Date.now();
-  const lastSeen = recentlyProcessed.get(key);
-  if (lastSeen && now - lastSeen < DEDUP_TTL_MS) return true;
-  recentlyProcessed.set(key, now);
-  // Cleanup old entries
-  for (const [k, t] of recentlyProcessed) {
-    if (now - t > DEDUP_TTL_MS) recentlyProcessed.delete(k);
-  }
-  return false;
-}
 
 async function connectDB() {
   if (isConnected) return;
@@ -38,164 +33,234 @@ function getFileType(contentType: string): "image" | "pdf" | "text" {
 }
 
 /**
- * Process a single file upload event
+ * Determines if a file processing message should be skipped based on the object key.
+ * Messages with keys containing "/extracted/" are acknowledged without processing
+ * to prevent reprocessing loops.
  */
-async function processFile(bucket: string, key: string) {
-  try {
-    const headResponse = await s3Client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
-    const contentType = headResponse.ContentType || "application/octet-stream";
-    const topicId = headResponse.Metadata?.topicid || "";
-    const userId = headResponse.Metadata?.userid || "";
-    const fileName = headResponse.Metadata?.filename || "";
+export function shouldSkipExtractedKey(key: string): boolean {
+  return key.includes("/extracted/");
+}
 
-    if (!topicId || !userId || !fileName) {
-      console.error(`Missing required metadata for ${key}. topicId:${topicId}, userId:${userId}, fileName:${fileName}`);
-      return;
-    }
+/**
+ * Determines if an error is transient (network timeout, S3 unavailability, DB failure)
+ * and should result in a nack_requeue.
+ */
+export function isTransientError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  return (
+    msg.includes("timeout") ||
+    msg.includes("econnrefused") ||
+    msg.includes("econnreset") ||
+    msg.includes("network") ||
+    msg.includes("etimedout") ||
+    msg.includes("ehostunreach") ||
+    (msg.includes("mongo") && msg.includes("connect")) ||
+    (msg.includes("s3") && !msg.includes("nosuchbucket"))
+  );
+}
 
-    // Validate content type
-    if (!ALLOWED_CONTENT_TYPES.includes(contentType)) {
-      console.error(`Invalid content type '${contentType}' for ${key}`);
-      return;
-    }
+/**
+ * Process a single file upload event.
+ * Throws typed errors for classification by the message handler.
+ */
+async function processFile(bucket: string, key: string): Promise<void> {
+  const parsedKey = parseUploadKey(key);
+  if (!parsedKey) {
+    throw new Error(`Key is not shaped like an upload: ${key}`);
+  }
+  const { topicId, userId, fileName } = parsedKey;
 
-    // Validate file size
-    const contentLength = headResponse.ContentLength || 0;
-    if (contentLength > MAX_FILE_SIZE) {
-      console.error(`File exceeds size limit: ${contentLength} bytes for ${key}`);
-      return;
-    }
+  const headResponse = await s3Client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+  const contentType = headResponse.ContentType || "application/octet-stream";
 
-    const response = await s3Client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
-    const fileBuffer = Buffer.from(await response.Body!.transformToByteArray());
+  // Validate content type
+  if (!ALLOWED_CONTENT_TYPES.includes(contentType)) {
+    throw new Error(`Invalid content type: ${contentType} for key: ${key}`);
+  }
 
-    await connectDB();
+  // Validate file size
+  const contentLength = headResponse.ContentLength || 0;
+  if (contentLength > MAX_FILE_SIZE) {
+    throw new Error(`File exceeds size limit: ${contentLength} bytes for key: ${key}`);
+  }
 
-    const fileType = getFileType(contentType);
+  await connectDB();
 
-    // Save file to DB first
-    const fileId = new mongoose.Types.ObjectId();
-    const fileData: IAttachedFile = {
-      _id: fileId,
-      fileName,
-      fileType,
-      s3Path: key,
-      s3Bucket: bucket,
-      processedAt: new Date(),
-    };
+  // Find the file subdocument by s3Path and update status to "processing"
+  await Topic.updateOne(
+    { _id: topicId, userId, "files.s3Path": key },
+    { $set: { "files.$.processingStatus": "processing" } },
+  );
 
-    const topic = await Topic.findOneAndUpdate({ _id: topicId, userId }, { $push: { files: fileData } });
-    if (!topic) {
-      console.error(`Topic not found: ${topicId}`);
-      return;
-    }
+  const response = await s3Client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+  const fileBuffer = Buffer.from(await response.Body!.transformToByteArray());
 
-    // Extract content
-    const result = await extractContent(fileType, {
-      fileBuffer,
-      mimeType: contentType,
-    });
+  const fileType = getFileType(contentType);
 
-    if (!result.success || !result.content) {
-      console.error(`Extraction failed for ${key}:`, result.error);
-      return;
-    }
+  // Extract content
+  const result = await extractContent(fileType, {
+    fileBuffer,
+    mimeType: contentType,
+  });
 
-    const extractedPath = `${userId}/${topicId}/extracted/${fileName}.md`;
-
-    await s3Client.send(
-      new PutObjectCommand({
-        Bucket: bucket,
-        Key: extractedPath,
-        Body: result.content,
-        ContentType: "text/plain",
-        Metadata: { userid: userId, topicid: topicId, originalfile: fileName },
-      }),
+  if (!result.success || !result.content) {
+    // Mark as failed
+    const errorMsg = result.error || "Extraction returned no content";
+    await Topic.updateOne(
+      { _id: topicId, userId, "files.s3Path": key },
+      {
+        $set: {
+          "files.$.processingStatus": "failed",
+          "files.$.errorReason": truncateErrorReason(errorMsg),
+        },
+      },
     );
+    throw new Error(`Extraction failed for key: ${key}: ${errorMsg}`);
+  }
 
-    // Update file with extractedContentUrl using the saved file's _id
-    await Topic.updateOne({ _id: topicId, "files._id": fileId }, { $set: { "files.$.extractedContentUrl": extractedPath } });
+  const extractedPath = `${userId}/${topicId}/extracted/${fileName}.md`;
 
-    console.log(`Successfully processed: ${key}`);
-  } catch (error) {
-    console.error(`Error processing ${key}:`, error);
+  await s3Client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: extractedPath,
+      Body: result.content,
+      ContentType: "text/plain",
+      Metadata: { userid: userId, topicid: topicId, originalfile: fileName },
+    }),
+  );
+
+  // Update file with extractedContentUrl and mark as completed
+  await Topic.updateOne(
+    { _id: topicId, userId, "files.s3Path": key },
+    {
+      $set: {
+        "files.$.extractedContentUrl": extractedPath,
+        "files.$.processingStatus": "completed",
+        "files.$.processedAt": new Date(),
+      },
+    },
+  );
+
+  log.info({ key }, "Successfully processed file");
+}
+
+/**
+ * RabbitMQ message handler for file processing messages.
+ *
+ * - Reads the `{ bucket, key }` message published by `storageWebhookController`
+ *   (the consumer has already validated it against fileProcessingMessageSchema)
+ * - Skips "/extracted/" keys (ack without processing)
+ * - Processes the file using processFile()
+ * - Classifies errors: transient → nack_requeue, permanent → nack_reject
+ */
+async function handleFileMessage(msg: ConsumeMessage): Promise<MessageOutcome> {
+  const { bucket, key } = JSON.parse(msg.content.toString()) as FileProcessingMessage;
+
+  // Skip "/extracted/" keys (ack without processing)
+  if (shouldSkipExtractedKey(key)) {
+    log.debug({ key }, "Skipping /extracted/ key, acking");
+    return "ack";
+  }
+
+  log.info({ bucket, key }, "Processing file message");
+
+  try {
+    await processFile(bucket, key);
+    return "ack";
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+
+    // Classify the error
+    if (isTransientError(err)) {
+      log.warn({ bucket, key, err }, "Transient error during file processing, requeueing");
+      return "nack_requeue";
+    }
+
+    // Permanent error — store errorReason on the file subdocument if possible
+    log.error({ bucket, key, err }, "Permanent error during file processing, rejecting");
+
+    // Try to update the file status to failed (best effort)
+    try {
+      const parsedKey = parseUploadKey(key);
+
+      if (parsedKey) {
+        await connectDB();
+        const { topicId, userId } = parsedKey;
+        await Topic.updateOne(
+          { _id: topicId, userId, "files.s3Path": key },
+          {
+            $set: {
+              "files.$.processingStatus": "failed",
+              "files.$.errorReason": truncateErrorReason(errorMsg),
+            },
+          },
+        );
+      }
+    } catch (updateErr) {
+      log.error({ err: updateErr, bucket, key }, "Failed to update file status on permanent error");
+    }
+
+    return "nack_reject";
   }
 }
 
 /**
- * AWS Lambda handler - triggered by S3 event notifications
+ * Starts the file processor consumer.
+ * Connects to RabbitMQ, declares Queue with named exchange, and begins consuming messages.
+ */
+export async function startFileConsumer(): Promise<void> {
+  const connectionManager = new ConnectionManager({ url: RABBITMQ_URL });
+  await connectionManager.connect();
+
+  QueuePublisher.setConnectionManager(connectionManager);
+  await new QueuePublisher({
+    queue: RABBITMQ_CONFIG.FILE_PROCESSING_QUEUE,
+    exchange: RABBITMQ_CONFIG.FILE_PROCESSING_EXCHANGE,
+    routingKey: RABBITMQ_CONFIG.FILE_PROCESSING_ROUTING_KEY,
+    dlqName: RABBITMQ_CONFIG.FILE_PROCESSING_DLQ,
+  }).init();
+
+  const consumer = new QueueConsumer(connectionManager);
+  await consumer.consume(RABBITMQ_CONFIG.FILE_PROCESSING_QUEUE, handleFileMessage, {
+    schema: fileProcessingMessageSchema,
+  });
+
+  log.info("File processor consumer started");
+}
+
+/**
+ * AWS Lambda handler - triggered by S3 event notifications (backward compatibility)
  */
 export const handler = async (event: S3Event, _context: Context) => {
-  console.log("Processing S3 event:", JSON.stringify(event, null, 2));
+  log.info({ event: JSON.stringify(event) }, "Processing S3 event");
+
+  await connectDB();
 
   for (const record of event.Records) {
     const bucket = record.s3.bucket.name;
     const key = decodeURIComponent(record.s3.object.key.replace(/\+/g, " "));
-    await processFile(bucket, key);
+
+    // Skip extracted content files
+    if (key.includes("/extracted/")) continue;
+
+    try {
+      await processFile(bucket, key);
+    } catch (error) {
+      log.error({ key, err: error }, "Error processing file in Lambda handler");
+    }
   }
 
   return { statusCode: 200, body: "Processing complete" };
 };
 
-/**
- * MinIO bucket notification listener - runs as a long-lived process
- * Automatically triggers when a file is uploaded to MinIO
- *
- * PREREQUISITE: MinIO must have bucket notifications enabled.
- * Run: mc event add local/revision-study-content arn:minio:sqs::_:webhook --event put
- */
-export async function startMinioListener() {
-  if (!useMinio || !minioClient) {
-    console.error("MinIO listener can only run when BUCKET_TYPE=minio");
-    return;
-  }
-
-  console.log(`Starting MinIO bucket notification listener on bucket: ${S3_BUCKET_NAME}`);
-
-  // Empty prefix and suffix to listen for all objects
-  const poller = minioClient.listenBucketNotification(S3_BUCKET_NAME, "", "", ["s3:ObjectCreated:*"]);
-
-  poller.on("notification", async (record: any) => {
-    try {
-      console.log("Triggered");
-      const events = record.Records || [record];
-      for (const event of events) {
-        if (!event.s3) continue;
-        const bucket = event.s3.bucket.name;
-
-        const key = decodeURIComponent(event.s3.object.key.replace(/\+/g, " "));
-
-        // Skip extracted content files to avoid infinite loop
-        if (key.includes("/extracted/")) continue;
-
-        // Skip duplicate notifications for the same key
-        if (isDuplicate(key)) continue;
-
-        console.log(`MinIO notification received for: ${key}`);
-        await processFile(bucket, key);
-      }
-    } catch (error) {
-      console.error("Error handling notification:", error);
-    }
-  });
-
-  poller.start();
-
-  poller.on("error", (error: unknown) => {
-    console.error("MinIO listener error:", error);
-    // Restart listener after a delay
-    setTimeout(() => {
-      console.log("Restarting MinIO listener...");
-      startMinioListener();
-    }, 5000);
-  });
-
-  console.log("MinIO listener started successfully");
-}
-
-// Auto-start MinIO listener when this module is loaded in dev
-console.log("BUCKET_TYPE:", process.env.BUCKET_TYPE, "useMinio:", useMinio);
-if (useMinio) {
-  console.log("Notification server on");
-  startMinioListener();
+// Auto-start consumer when this module is loaded as a standalone service
+if (process.env.START_FILE_CONSUMER === "true") {
+  connectDB()
+    .then(() => startFileConsumer())
+    .catch((err) => {
+      log.fatal({ err }, "Failed to start file consumer");
+      process.exit(1);
+    });
 }

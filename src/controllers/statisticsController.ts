@@ -4,6 +4,9 @@ import { RevisionRecord } from "@models/RevisionRecord.js";
 import { DuePerSubject, StatisticsResponse } from "$types/statistics.types.js";
 import { ErrorResponse } from "$types/common.types.js";
 import { DateTime } from "luxon";
+import { logger } from "@config/logger.js";
+
+const log = logger.child({ module: "statisticsController" });
 
 /**
  * GET /api/statistics
@@ -112,7 +115,7 @@ export async function getStatistics(req: Request, res: Response): Promise<void> 
 
     res.status(200).json(statistics);
   } catch (error) {
-    console.error("Error fetching statistics:", error);
+    log.error({ err: error }, "Error fetching statistics");
 
     // Generic error response
     res.status(500).json({

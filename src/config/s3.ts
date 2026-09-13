@@ -1,27 +1,29 @@
 import { S3Client } from "@aws-sdk/client-s3";
-import * as Minio from "minio";
-
-// const isProduction = process.env.NODE_ENV === 'production';
-export const useMinio = process.env.BUCKET_TYPE === "minio";
 
 /**
- * Creates an S3 client configured for either AWS S3 (production) or MinIO (development).
+ * True when object storage is the self-hosted SeaweedFS S3 gateway rather than
+ * AWS S3. `BUCKET_TYPE`, not `NODE_ENV`, is the switch.
+ */
+export const useSeaweedFS = process.env.BUCKET_TYPE === "seaweedfs";
+
+/**
+ * Creates an S3 client configured for either AWS S3 or the SeaweedFS S3 gateway.
  *
- * Production (NODE_ENV=production):
- * - Uses AWS S3 with credentials from AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
+ * `BUCKET_TYPE=seaweedfs`:
+ * - Endpoint from S3_ENDPOINT:S3_PORT (defaults to localhost:8333)
+ * - Credentials from S3_ACCESS_KEY and S3_SECRET_KEY, which must match an
+ *   identity in the gateway's `s3.json`
+ * - Path-style addressing, and TLS via S3_USE_SSL
+ *
+ * Anything else:
+ * - AWS S3 with credentials from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
  * - Region from AWS_REGION (defaults to us-east-1)
- *
- * Development (NODE_ENV=development or not set):
- * - Uses MinIO with S3-compatible API
- * - Endpoint from MINIO_ENDPOINT:MINIO_PORT (defaults to localhost:9000)
- * - Credentials from MINIO_ACCESS_KEY and MINIO_SECRET_KEY (defaults to minioadmin)
- * - Supports SSL via MINIO_USE_SSL environment variable
  *
  * @returns Configured S3Client instance
  */
 export const createS3Client = (): S3Client => {
-  if (!useMinio) {
-    // AWS S3 Configuration for Production
+  if (!useSeaweedFS) {
+    // AWS S3
     return new S3Client({
       region: process.env.AWS_REGION || "us-east-1",
       credentials: {
@@ -29,28 +31,33 @@ export const createS3Client = (): S3Client => {
         secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || "",
       },
     });
-  } else {
-    // MinIO Configuration for Local Development
-    // Using AWS SDK v3 S3Client with MinIO-compatible configuration
-    const minioEndpoint = process.env.MINIO_ENDPOINT || "localhost";
-    const minioPort = process.env.MINIO_PORT || "9000";
-    const minioUseSSL = process.env.MINIO_USE_SSL === "true";
-
-    return new S3Client({
-      region: "us-east-1", // MinIO requires a region but doesn't use it
-      endpoint: `http${minioUseSSL ? "s" : ""}://${minioEndpoint}:${minioPort}`,
-      credentials: {
-        accessKeyId: process.env.MINIO_ACCESS_KEY || "minioadmin",
-        secretAccessKey: process.env.MINIO_SECRET_KEY || "minioadmin",
-      },
-      forcePathStyle: true, // Required for MinIO compatibility
-    });
   }
+
+  // SeaweedFS S3 gateway
+  const endpoint = process.env.S3_ENDPOINT || "localhost";
+  const port = process.env.S3_PORT || "8333";
+  const useSSL = process.env.S3_USE_SSL === "true";
+
+  return new S3Client({
+    region: process.env.AWS_REGION || "us-east-1", // SeaweedFS requires a region but does not use it
+    endpoint: `http${useSSL ? "s" : ""}://${endpoint}:${port}`,
+    credentials: {
+      accessKeyId: process.env.S3_ACCESS_KEY || "seaweedfsadmin",
+      secretAccessKey: process.env.S3_SECRET_KEY || "seaweedfsadmin",
+    },
+    forcePathStyle: true,
+    // SeaweedFS reads x-amz-checksum-* out of the presigned query string and
+    // verifies it against the bytes the browser actually uploads. The SDK
+    // default ("WHEN_SUPPORTED") hoists a CRC32 of the *empty* presign body
+    // into that query, so every presigned upload would fail the check.
+    requestChecksumCalculation: "WHEN_REQUIRED",
+    responseChecksumValidation: "WHEN_REQUIRED",
+  });
 };
 
 /**
  * Singleton S3 client instance.
- * Automatically configured based on NODE_ENV.
+ * Automatically configured based on BUCKET_TYPE.
  */
 export const s3Client = createS3Client();
 
@@ -59,17 +66,3 @@ export const s3Client = createS3Client();
  * Defaults to 'revision-study-content' if not specified.
  */
 export const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || "revision-study-content";
-
-/**
- * MinIO client instance (only for MinIO-specific APIs like bucket notifications).
- * null in production.
- */
-export const minioClient = useMinio
-  ? new Minio.Client({
-      endPoint: process.env.MINIO_ENDPOINT || "localhost",
-      port: parseInt(process.env.MINIO_PORT || "9000"),
-      useSSL: process.env.MINIO_USE_SSL === "true",
-      accessKey: process.env.MINIO_ACCESS_KEY || "minioadmin",
-      secretKey: process.env.MINIO_SECRET_KEY || "minioadmin",
-    })
-  : null;

@@ -1,4 +1,7 @@
 import mongoose from 'mongoose';
+import { logger } from "@config/logger.js";
+
+const log = logger.child({ module: "database" });
 
 export const connectDatabase = async (): Promise<void> => {
   try {
@@ -6,18 +9,18 @@ export const connectDatabase = async (): Promise<void> => {
     
     await mongoose.connect(mongoUri);
     
-    console.log('MongoDB connected successfully');
+    log.info('MongoDB connected successfully');
     
     mongoose.connection.on('error', (error) => {
-      console.error('MongoDB connection error:', error);
+      log.error({ err: error }, 'MongoDB connection error');
     });
     
     mongoose.connection.on('disconnected', () => {
-      console.log('MongoDB disconnected');
+      log.warn('MongoDB disconnected');
     });
     
   } catch (error) {
-    console.error('Failed to connect to MongoDB:', error);
+    log.fatal({ err: error }, 'Failed to connect to MongoDB');
     throw error;
   }
 };
