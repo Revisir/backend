@@ -9,6 +9,11 @@ export interface UploadKeyParts {
   fileName: string;
 }
 
+/** The object key an upload is stored under, and the `s3Path` of its file entry. */
+export function buildUploadKey(userId: string, topicId: string, fileName: string): string {
+  return `${userId}/${topicId}/files/${fileName}`;
+}
+
 /**
  * Derives the owning user, topic and original file name from an upload key.
  *

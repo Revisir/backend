@@ -1,5 +1,7 @@
 import { Schema, model, Document, Types } from "mongoose";
 
+export type ProcessingStatus = "pending" | "processing" | "completed" | "failed";
+
 /**
  * Interface for AttachedFile subdocument
  */
@@ -10,9 +12,13 @@ export interface IAttachedFile {
   // fileUrl: string;
   s3Path: string;
   s3Bucket: string;
+  /** Declared size at upload, or the stored object's size when the worker created the entry. */
+  size?: number | null;
   extractedContentUrl?: string;
   processedAt: Date;
-  processingStatus: "pending" | "processing" | "completed" | "failed";
+  processingStatus: ProcessingStatus;
+  /** When `processingStatus` last changed; drives the staleness window. Missing on legacy entries. */
+  statusUpdatedAt?: Date | null;
   errorReason?: string;
 }
 
@@ -24,8 +30,65 @@ export interface IAttachedUrl {
   url: string;
   extractedContentPath?: string;
   processedAt?: Date;
-  processingStatus: "pending" | "processing" | "completed" | "failed";
+  processingStatus: ProcessingStatus;
+  /** When `processingStatus` last changed; drives the staleness window. Missing on legacy entries. */
+  statusUpdatedAt?: Date | null;
   errorReason?: string;
+}
+
+export const BANK_STATES = ["none", "queued", "building", "ready", "empty", "failed"] as const;
+export type BankState = (typeof BANK_STATES)[number];
+
+/**
+ * One checked question in a topic's bank. Answers never leave the server
+ * except one at a time, after the learner has answered that question.
+ */
+export interface IBankQuestion {
+  /** Random id, stable for the life of one build. */
+  id: string;
+  /** `normalizeText(prompt)`: the retirement and de-duplication key. */
+  key: string;
+  type: "mcq" | "fill_blank";
+  /** A fill-in-the-blank prompt contains exactly one `____`. */
+  prompt: string;
+  /** Multiple choice: four unique options, one of which equals `answer`. */
+  options?: string[];
+  answer: string;
+  /** Fill in the blank: other answers that also count as correct. */
+  alternatives?: string[];
+}
+
+/**
+ * A topic's question bank and the state of its builds.
+ *
+ * `questions` is replaced on every successful build and stays usable while a
+ * rebuild is queued or building, and after an empty or failed one (R38).
+ */
+export interface IQuestionBank {
+  state: BankState;
+  questions: IBankQuestion[];
+  /** Denormalized `questions.length`, so availability never has to load the questions. */
+  usableCount: number;
+  /** When the latest build was requested. */
+  requestedAt: Date | null;
+  /** Claim time of the running build. */
+  claimedAt: Date | null;
+  /** `requestedAt` of the queue message holding the claim; a redelivery of it may take the claim over. */
+  claimRequestedAt: Date | null;
+  /** Claim time of the last build that finished as ready or empty. Requests older than this are already covered. */
+  sourcedAt: Date | null;
+  builtAt: Date | null;
+  /** Sweep republishes of a stalled build. */
+  attempts: number;
+  errorCode: string | null;
+  errorReason: string | null;
+}
+
+/** A flagged question. The list is append-only and survives every build. */
+export interface IRetiredQuestion {
+  key: string;
+  text: string;
+  retiredAt: Date;
 }
 
 /**
@@ -47,6 +110,8 @@ export interface ITopic extends Document {
   lastQuality: number | null;
   urls: Types.DocumentArray<IAttachedUrl>;
   files: Types.DocumentArray<IAttachedFile>;
+  questionBank: IQuestionBank;
+  retiredQuestions: IRetiredQuestion[];
   mindMap: string | null;
   mindMapGeneratedAt: Date | null;
   createdAt: Date;
@@ -80,6 +145,10 @@ const AttachedFileSchema = new Schema<IAttachedFile>({
     type: String,
     required: true,
   },
+  size: {
+    type: Number,
+    default: null,
+  },
   extractedContentUrl: {
     type: String,
     default: null,
@@ -92,6 +161,12 @@ const AttachedFileSchema = new Schema<IAttachedFile>({
     type: String,
     enum: ["pending", "processing", "completed", "failed"],
     default: "pending",
+  },
+  // No default: a hydrated legacy entry must not look freshly updated.
+  // Readers fall back to the subdocument _id's creation time.
+  statusUpdatedAt: {
+    type: Date,
+    default: null,
   },
   errorReason: {
     type: String,
@@ -121,12 +196,40 @@ const AttachedUrlSchema = new Schema<IAttachedUrl>({
     enum: ["pending", "processing", "completed", "failed"],
     default: "pending",
   },
+  // No default: a hydrated legacy entry must not look freshly updated.
+  // Readers fall back to the subdocument _id's creation time.
+  statusUpdatedAt: {
+    type: Date,
+    default: null,
+  },
   errorReason: {
     type: String,
     maxlength: 500,
     default: null,
   },
 });
+
+const BankQuestionSchema = new Schema<IBankQuestion>(
+  {
+    id: { type: String, required: true },
+    key: { type: String, required: true },
+    type: { type: String, enum: ["mcq", "fill_blank"], required: true },
+    prompt: { type: String, required: true },
+    options: { type: [String], default: undefined },
+    answer: { type: String, required: true },
+    alternatives: { type: [String], default: undefined },
+  },
+  { _id: false },
+);
+
+const RetiredQuestionSchema = new Schema<IRetiredQuestion>(
+  {
+    key: { type: String, required: true },
+    text: { type: String, required: true },
+    retiredAt: { type: Date, required: true },
+  },
+  { _id: false },
+);
 
 /**
  * Mongoose schema for Topic document
@@ -191,6 +294,25 @@ const TopicSchema = new Schema<ITopic>(
       default: [],
     },
     files: [AttachedFileSchema],
+    questionBank: {
+      state: { type: String, enum: BANK_STATES, default: "none" },
+      // Answer keys: excluded from every topic query unless explicitly selected.
+      questions: { type: [BankQuestionSchema], default: [], select: false },
+      usableCount: { type: Number, default: 0, min: 0 },
+      requestedAt: { type: Date, default: null },
+      claimedAt: { type: Date, default: null },
+      claimRequestedAt: { type: Date, default: null },
+      sourcedAt: { type: Date, default: null },
+      builtAt: { type: Date, default: null },
+      attempts: { type: Number, default: 0 },
+      errorCode: { type: String, default: null },
+      errorReason: { type: String, maxlength: 500, default: null },
+    },
+    retiredQuestions: {
+      type: [RetiredQuestionSchema],
+      default: [],
+      select: false,
+    },
     mindMap: {
       type: String,
       default: null,
@@ -240,6 +362,7 @@ TopicSchema.set("toObject", { virtuals: true });
 TopicSchema.index({ userId: 1, revisionDate: 1 }); // for user-specific due topics queries
 TopicSchema.index({ userId: 1, subjectName: 1 }); // for user-specific subject filtering
 TopicSchema.index({ userId: 1, createdAt: -1 }); // for user-specific recent topics
+TopicSchema.index({ "questionBank.state": 1 }); // for the stalled-bank sweep
 
 /**
  * Truncates an error reason string to at most 500 characters.
