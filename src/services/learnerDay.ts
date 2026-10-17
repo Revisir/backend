@@ -62,6 +62,22 @@ export function isDueToday(topic: { revisionDate: Date }, day: LearnerDay): bool
   return new Date(topic.revisionDate).getTime() < day.tomorrowStart.getTime();
 }
 
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * The new study date when a topic edit changes it, or null when it does not.
+ *
+ * The edit form shows the stored timestamp as a date in the browser's zone and
+ * sends that date back unchanged, so the comparison is made in the learner's
+ * zone (KTD20). A changed date-only value is stored as UTC midnight of that
+ * day, as topic creation does; a full ISO value is stored as given.
+ */
+export function changedStudyDate(submitted: string, stored: Date, day: LearnerDay): Date | null {
+  const next = DATE_ONLY.test(submitted) ? new Date(`${submitted}T00:00:00.000Z`) : new Date(submitted);
+  const nextLocal = DATE_ONLY.test(submitted) ? submitted : localDateOf(next, day);
+  return nextLocal === localDateOf(stored, day) ? null : next;
+}
+
 /**
  * The calendar date (`YYYY-MM-DD`) an instant falls on in the learner's zone.
  * Used to compare a date-only form value against a stored timestamp.

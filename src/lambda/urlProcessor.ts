@@ -29,7 +29,7 @@ export interface UrlProcessorEvent {
 let isConnected = false;
 
 async function connectDB() {
-  if (isConnected) return;
+  if (isConnected || mongoose.connection.readyState === 1) return;
   await mongoose.connect(process.env.MONGODB_URI!);
   isConnected = true;
 }
@@ -130,7 +130,7 @@ export function isTransientError(err: unknown): boolean {
  * - Updates status to "completed" or "failed" per URL
  * - Classifies errors: transient → nack_requeue, permanent → nack_reject
  */
-async function handleUrlMessage(msg: ConsumeMessage): Promise<MessageOutcome> {
+export async function handleUrlMessage(msg: ConsumeMessage): Promise<MessageOutcome> {
   const parsed = JSON.parse(msg.content.toString());
   const { topicId, userId, urls } = parsed;
 
@@ -139,7 +139,7 @@ async function handleUrlMessage(msg: ConsumeMessage): Promise<MessageOutcome> {
   // Update all URL statuses to "processing"
   await Topic.updateMany(
     { _id: topicId, userId },
-    { $set: { "urls.$[elem].processingStatus": "processing" } },
+    { $set: { "urls.$[elem].processingStatus": "processing", "urls.$[elem].statusUpdatedAt": new Date() } },
     { arrayFilters: [{ "elem.url": { $in: urls } }] },
   );
 
@@ -171,6 +171,8 @@ async function handleUrlMessage(msg: ConsumeMessage): Promise<MessageOutcome> {
               "urls.$.extractedContentPath": extractedPath,
               "urls.$.processedAt": new Date(),
               "urls.$.processingStatus": "completed",
+              "urls.$.statusUpdatedAt": new Date(),
+              "urls.$.errorReason": null,
             },
           },
         );
@@ -184,6 +186,7 @@ async function handleUrlMessage(msg: ConsumeMessage): Promise<MessageOutcome> {
           {
             $set: {
               "urls.$.processingStatus": "failed",
+              "urls.$.statusUpdatedAt": new Date(),
               "urls.$.errorReason": truncateErrorReason("Extraction returned no content"),
             },
           },
@@ -205,6 +208,7 @@ async function handleUrlMessage(msg: ConsumeMessage): Promise<MessageOutcome> {
         {
           $set: {
             "urls.$.processingStatus": "failed",
+            "urls.$.statusUpdatedAt": new Date(),
             "urls.$.errorReason": truncateErrorReason(errorMsg),
           },
         },

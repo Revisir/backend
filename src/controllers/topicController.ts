@@ -4,24 +4,15 @@ import { RevisionRecord } from "@models/RevisionRecord.js";
 import { generateMindMap } from "@services/mindMapGenerator.js";
 import { generatePresignedUploadUrl, deleteTopicFiles, deleteFile, deleteByPath, getSignedContentUrl } from "@services/s3Storage.js";
 import { recordRevision, AlreadyReviewedTodayError, TopicNotFoundError } from "@services/reviewRecorder.js";
-import { getLearnerDay } from "@services/learnerDay.js";
+import { getLearnerDay, changedStudyDate } from "@services/learnerDay.js";
 import { GetTopicsResponse } from "$types/topic.types.js";
 import { ErrorResponse } from "$types/common.types.js";
-import { getTopicsQuerySchema, topicIdParamSchema, topicFileParamSchema, markRevisedSchema } from "@/schemas/index.js";
-import { Publishers } from "@services/rabbitmq/index.js";
-import { filterPublishableUrls } from "@controllers/createTopicController.js";
+import { getTopicsQuerySchema, topicIdParamSchema, topicFileParamSchema, markRevisedSchema, updateTopicSchema } from "@/schemas/index.js";
+import { applyUrlListUpdate, upsertPendingFileEntries } from "@services/topicMaterials.js";
 import { z } from "zod";
 import { logger } from "@config/logger.js";
 
 const log = logger.child({ module: "topicController" });
-
-const updateTopicSchema = z.object({
-  topicName: z.string().max(200).optional(),
-  subjectName: z.string().max(100).optional(),
-  description: z.string().optional(),
-  urls: z.array(z.string().url()).optional(),
-  dateStudied: z.string().datetime().optional(),
-});
 
 import { ALLOWED_CONTENT_TYPES, MAX_FILE_SIZE, MAX_FILES_PER_UPLOAD, MAX_FILES_PER_TOPIC } from "@/config/fileConstants.js";
 
@@ -125,10 +116,12 @@ export async function getTopicById(req: Request, res: Response): Promise<void> {
         fileName: file.fileName,
         fileType: file.fileType,
         fileUrl: await getSignedContentUrl(file.s3Path),
+        ...statusFields(file),
       })),
     );
+    const urls = (topic.urls || []).map(({ errorReason, ...url }) => ({ ...url, ...statusFields({ processingStatus: url.processingStatus, errorReason }) }));
 
-    res.status(200).json({ ...topic, files });
+    res.status(200).json({ ...topic, files, urls });
   } catch (error) {
     log.error({ err: error }, "Error fetching topic by ID");
 
@@ -640,54 +633,44 @@ export async function updateTopic(req: Request, res: Response): Promise<void> {
       return;
     }
 
+    const day = getLearnerDay(req);
+
     if (updates.topicName) topic.topicName = updates.topicName.trim();
     if (updates.subjectName) topic.subjectName = updates.subjectName.trim();
     if (updates.description !== undefined) topic.description = updates.description.trim();
+
     if (updates.urls !== undefined) {
-      const existingUrls = topic.urls.map((u) => u.url);
-      const newUrls = updates.urls.filter((u) => !existingUrls.includes(u));
-      const removedUrls = topic.urls.filter((u) => !updates.urls!.includes(u.url));
-
-      // Delete extracted files for removed URLs
-      for (const removed of removedUrls) {
-        if (removed.extractedContentPath) {
-          await deleteByPath(removed.extractedContentPath);
-        }
-      }
-
-      topic.urls = updates.urls.map((url) => ({ url })) as any;
-      const processableUrls = filterPublishableUrls(newUrls);
-      if (processableUrls.length && Publishers.url) {
-        try {
-          await Publishers.url.publish({
-            message: { topicId: id, userId: req.userId!, urls: processableUrls },
-          });
-        } catch (err) {
-          log.error({ err, topicId: id, urls: processableUrls }, "Failed to publish URL processing message");
-        }
-      }
+      // Atomic array updates: existing entries keep their status and paths (R41).
+      await applyUrlListUpdate(topic, updates.urls, day.now);
     }
 
     // Clear mindmap if no materials remain
-    const hasFiles = topic.files.length > 0;
-    const hasHttpUrls = topic.urls.some((u) => u.url.startsWith("http://") || u.url.startsWith("https://"));
+    const materials = await Topic.findOne({ _id: id, userId: req.userId }).select("files urls").lean();
+    const hasFiles = (materials?.files.length ?? 0) > 0;
+    const hasHttpUrls = (materials?.urls ?? []).some((u) => u.url.startsWith("http://") || u.url.startsWith("https://"));
     if (!hasFiles && !hasHttpUrls) {
       topic.mindMap = null;
       topic.mindMapGeneratedAt = null;
     }
 
-    if (updates.dateStudied) {
-      topic.dateStudied = new Date(updates.dateStudied);
+    // Only a changed study date resets the schedule and history (R42, KTD20).
+    const newStudyDate = updates.dateStudied ? changedStudyDate(updates.dateStudied, topic.dateStudied, day) : null;
+    if (newStudyDate) {
+      topic.dateStudied = newStudyDate;
       topic.eFactor = 2.5;
       topic.interval = 1;
       topic.repetitionNumber = 0;
-      topic.revisionDate = new Date(updates.dateStudied);
+      topic.revisionDate = newStudyDate;
+      topic.lastRevised = null;
+      topic.lastQuality = null;
       await RevisionRecord.deleteMany({ topicId: id, userId: req.userId });
     }
 
     await topic.save();
 
-    res.status(200).json({ success: true, topic });
+    const updated = await Topic.findOne({ _id: id, userId: req.userId });
+
+    res.status(200).json({ success: true, topic: updated });
   } catch (error) {
     log.error({ err: error }, "Error updating topic");
 
@@ -830,6 +813,9 @@ export async function uploadTopicFiles(req: Request, res: Response): Promise<voi
       })),
     );
 
+    // A pending entry per file, so it shows on the topic page while it uploads and extracts.
+    await upsertPendingFileEntries(id, req.userId!, files);
+
     res.status(200).json({ uploadUrls });
   } catch (error) {
     log.error({ err: error }, "Error generating upload URLs");
@@ -942,4 +928,12 @@ export async function deleteTopic(req: Request, res: Response): Promise<void> {
       },
     } as ErrorResponse);
   }
+}
+
+/**
+ * The status an attachment shows on the topic page, with its reason when it failed.
+ */
+function statusFields(att: { processingStatus?: string | null; errorReason?: string | null }) {
+  const processingStatus = att.processingStatus ?? "pending";
+  return processingStatus === "failed" ? { processingStatus, errorReason: att.errorReason ?? "Extraction failed" } : { processingStatus };
 }

@@ -3,8 +3,9 @@ import "dotenv/config";
 import { S3Event, Context } from "aws-lambda";
 import { GetObjectCommand, PutObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import mongoose from "mongoose";
-import { Topic, truncateErrorReason } from "@models/Topic.js";
 import { extractContent } from "@services/fileExtractor.js";
+import { fileTypeFor } from "@services/attachments.js";
+import { ensureFileEntry, setFileStatus } from "@services/topicMaterials.js";
 import { parseUploadKey } from "@services/uploadKey.js";
 import { logger } from "@config/logger.js";
 import { s3Client } from "@/config/s3.js";
@@ -21,15 +22,9 @@ const log = logger.child({ module: "fileProcessor" });
 let isConnected = false;
 
 async function connectDB() {
-  if (isConnected) return;
+  if (isConnected || mongoose.connection.readyState === 1) return;
   await mongoose.connect(process.env.MONGODB_URI!);
   isConnected = true;
-}
-
-function getFileType(contentType: string): "image" | "pdf" | "text" {
-  if (contentType.startsWith("image/")) return "image";
-  if (contentType === "application/pdf") return "pdf";
-  return "text";
 }
 
 /**
@@ -73,6 +68,17 @@ async function processFile(bucket: string, key: string): Promise<void> {
 
   const headResponse = await s3Client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
   const contentType = headResponse.ContentType || "application/octet-stream";
+  const contentLength = headResponse.ContentLength || 0;
+
+  await connectDB();
+
+  // Create the entry if the API never did, so a rejected or failed upload
+  // still shows on the topic page with its reason.
+  const topicExists = await ensureFileEntry({ topicId, userId, key, bucket, fileName, contentType, size: contentLength });
+  if (!topicExists) {
+    log.warn({ key }, "Upload belongs to a topic that no longer exists, skipping");
+    return;
+  }
 
   // Validate content type
   if (!ALLOWED_CONTENT_TYPES.includes(contentType)) {
@@ -80,42 +86,24 @@ async function processFile(bucket: string, key: string): Promise<void> {
   }
 
   // Validate file size
-  const contentLength = headResponse.ContentLength || 0;
   if (contentLength > MAX_FILE_SIZE) {
     throw new Error(`File exceeds size limit: ${contentLength} bytes for key: ${key}`);
   }
 
-  await connectDB();
-
-  // Find the file subdocument by s3Path and update status to "processing"
-  await Topic.updateOne(
-    { _id: topicId, userId, "files.s3Path": key },
-    { $set: { "files.$.processingStatus": "processing" } },
-  );
+  await setFileStatus(topicId, userId, key, "processing");
 
   const response = await s3Client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
   const fileBuffer = Buffer.from(await response.Body!.transformToByteArray());
 
-  const fileType = getFileType(contentType);
-
   // Extract content
-  const result = await extractContent(fileType, {
+  const result = await extractContent(fileTypeFor(contentType), {
     fileBuffer,
     mimeType: contentType,
   });
 
   if (!result.success || !result.content) {
-    // Mark as failed
     const errorMsg = result.error || "Extraction returned no content";
-    await Topic.updateOne(
-      { _id: topicId, userId, "files.s3Path": key },
-      {
-        $set: {
-          "files.$.processingStatus": "failed",
-          "files.$.errorReason": truncateErrorReason(errorMsg),
-        },
-      },
-    );
+    await setFileStatus(topicId, userId, key, "failed", { errorReason: errorMsg });
     throw new Error(`Extraction failed for key: ${key}: ${errorMsg}`);
   }
 
@@ -131,17 +119,7 @@ async function processFile(bucket: string, key: string): Promise<void> {
     }),
   );
 
-  // Update file with extractedContentUrl and mark as completed
-  await Topic.updateOne(
-    { _id: topicId, userId, "files.s3Path": key },
-    {
-      $set: {
-        "files.$.extractedContentUrl": extractedPath,
-        "files.$.processingStatus": "completed",
-        "files.$.processedAt": new Date(),
-      },
-    },
-  );
+  await setFileStatus(topicId, userId, key, "completed", { extractedContentUrl: extractedPath });
 
   log.info({ key }, "Successfully processed file");
 }
@@ -155,7 +133,7 @@ async function processFile(bucket: string, key: string): Promise<void> {
  * - Processes the file using processFile()
  * - Classifies errors: transient → nack_requeue, permanent → nack_reject
  */
-async function handleFileMessage(msg: ConsumeMessage): Promise<MessageOutcome> {
+export async function handleFileMessage(msg: ConsumeMessage): Promise<MessageOutcome> {
   const { bucket, key } = JSON.parse(msg.content.toString()) as FileProcessingMessage;
 
   // Skip "/extracted/" keys (ack without processing)
@@ -187,16 +165,7 @@ async function handleFileMessage(msg: ConsumeMessage): Promise<MessageOutcome> {
 
       if (parsedKey) {
         await connectDB();
-        const { topicId, userId } = parsedKey;
-        await Topic.updateOne(
-          { _id: topicId, userId, "files.s3Path": key },
-          {
-            $set: {
-              "files.$.processingStatus": "failed",
-              "files.$.errorReason": truncateErrorReason(errorMsg),
-            },
-          },
-        );
+        await setFileStatus(parsedKey.topicId, parsedKey.userId, key, "failed", { errorReason: errorMsg });
       }
     } catch (updateErr) {
       log.error({ err: updateErr, bucket, key }, "Failed to update file status on permanent error");

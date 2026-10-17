@@ -33,6 +33,20 @@ export const topicFileParamSchema = z.object({
   fileId: z.string().regex(mongoIdRegex, "Invalid file ID format"),
 });
 
+/**
+ * PATCH /api/topics/:id. `dateStudied` takes the edit form's date-only value
+ * (`YYYY-MM-DD`) or a full ISO date-time.
+ */
+export const updateTopicSchema = z.object({
+  topicName: z.string().max(200).optional(),
+  subjectName: z.string().max(100).optional(),
+  description: z.string().optional(),
+  urls: z.array(z.string().url()).optional(),
+  dateStudied: z
+    .union([z.iso.date(), z.iso.datetime({ offset: true })], { error: "dateStudied must be a date (YYYY-MM-DD) or an ISO date-time" })
+    .optional(),
+});
+
 /** Done on the topic page: the learner's own 0–5 rating. */
 export const markRevisedSchema = z.object({
   userQuality: z.number("userQuality must be a number between 0 and 5").min(0, "userQuality must be between 0 and 5").max(5, "userQuality must be between 0 and 5"),
@@ -42,3 +56,4 @@ export type CreateTopicInput = z.infer<typeof createTopicSchema>;
 export type GetTopicsQuery = z.infer<typeof getTopicsQuerySchema>;
 export type TopicIdParam = z.infer<typeof topicIdParamSchema>;
 export type MarkRevisedInput = z.infer<typeof markRevisedSchema>;
+export type UpdateTopicInput = z.infer<typeof updateTopicSchema>;
