@@ -304,17 +304,21 @@ const TopicSchema = new Schema<ITopic>(
       default: [],
     },
     files: [AttachedFileSchema],
+    // No defaults on state, usableCount or attempts: Mongoose saves a non-null
+    // default applied at hydration, so a topic loaded before a bank write and
+    // saved after it would overwrite that write. A missing value reads as
+    // none/0 (`toQuestionBankView`). Null defaults are never written.
     questionBank: {
-      state: { type: String, enum: BANK_STATES, default: "none" },
+      state: { type: String, enum: BANK_STATES },
       // Answer keys: excluded from every topic query unless explicitly selected.
       questions: { type: [BankQuestionSchema], default: [], select: false },
-      usableCount: { type: Number, default: 0, min: 0 },
+      usableCount: { type: Number, min: 0 },
       requestedAt: { type: Date, default: null },
       claimedAt: { type: Date, default: null },
       claimRequestedAt: { type: Date, default: null },
       sourcedAt: { type: Date, default: null },
       builtAt: { type: Date, default: null },
-      attempts: { type: Number, default: 0 },
+      attempts: { type: Number },
       errorCode: { type: String, default: null },
       errorReason: { type: String, maxlength: 500, default: null },
     },

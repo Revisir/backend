@@ -18,7 +18,7 @@ import topicRoutes from "@routes/topicRoutes";
 import { Topic } from "@models/Topic";
 import { RevisionRecord } from "@models/RevisionRecord";
 import { Publishers } from "@services/rabbitmq/index";
-import { deleteByPath, deleteFile } from "@services/s3Storage";
+import { deleteByPath, deleteFile, generatePresignedUploadUrl } from "@services/s3Storage";
 
 useMongoMemoryServer();
 
@@ -79,6 +79,31 @@ describe("POST /api/topics — declared attachments", () => {
       { fileName: "diagram.png", fileType: "image", s3Path: `${USER}/${res.body.topicId}/files/diagram.png`, processingStatus: "pending", size: 500 },
     ]);
     topic!.files.forEach((f) => expect(f.statusUpdatedAt).toBeInstanceOf(Date));
+  });
+
+  it("saves nothing when a declared file is rejected", async () => {
+    const issueUrl = jest.mocked(generatePresignedUploadUrl);
+    const defaultIssue = issueUrl.getMockImplementation()!;
+    issueUrl.mockImplementation(async (userId, topicId, fileName, contentType, size) => {
+      if (fileName.includes("..")) throw new Error("S3 path contains invalid characters or patterns");
+      return defaultIssue(userId, topicId, fileName, contentType, size);
+    });
+
+    try {
+      const res = await newTopic({
+        urls: ["https://example.com/a"],
+        files: [
+          { fileName: "notes.pdf", size: 1000, contentType: "application/pdf" },
+          { fileName: "notes..v2.pdf", size: 1000, contentType: "application/pdf" },
+        ],
+      });
+
+      expect(res.status).toBe(500);
+      expect(await Topic.countDocuments()).toBe(0);
+      expect(publish).not.toHaveBeenCalled();
+    } finally {
+      issueUrl.mockImplementation(defaultIssue);
+    }
   });
 
   it("saves a URL that cannot be extracted as failed with a reason, and publishes only the rest", async () => {
@@ -214,6 +239,21 @@ describe("PATCH /api/topics/:id — study date", () => {
     expect(res.status).toBe(200);
     const after = await Topic.findById(topic._id).lean();
     expect(after!.repetitionNumber).toBe(3);
+    expect(after!.dateStudied.toISOString()).toBe("2026-01-15T00:00:00.000Z");
+    expect(await RevisionRecord.countDocuments({ topicId: topic._id })).toBe(3);
+  });
+
+  it("keeps the schedule when a New York learner types the stored UTC date, which is the same instant", async () => {
+    const topic = await seedTopic();
+    await seedHistory(topic._id, 3);
+
+    // The form shows 2026-01-14; "correcting" it to 2026-01-15 stores the instant already stored.
+    const res = await request(app).patch(`/api/topics/${topic._id}`).set("X-Local-TimeZone", "America/New_York").send({ dateStudied: "2026-01-15" });
+
+    expect(res.status).toBe(200);
+    const after = await Topic.findById(topic._id).lean();
+    expect(after).toMatchObject({ repetitionNumber: 3, interval: 15, eFactor: 2.36, lastQuality: 4 });
+    expect(after!.revisionDate.toISOString()).toBe("2026-02-01T00:00:00.000Z");
     expect(after!.dateStudied.toISOString()).toBe("2026-01-15T00:00:00.000Z");
     expect(await RevisionRecord.countDocuments({ topicId: topic._id })).toBe(3);
   });

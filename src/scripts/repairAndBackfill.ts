@@ -7,7 +7,9 @@
  *
  * Run after the backend is deployed, dry run first. Idempotent: a second run
  * plans nothing. Never deletes objects or records. See
- * `src/services/launchRepair.ts` for exactly what it changes.
+ * `src/services/launchRepair.ts` for exactly what it changes. A topic that
+ * fails (an unreadable object, a storage error) is logged and skipped; the
+ * run continues and exits 1 with `topicsFailed` in its summary.
  *
  * The runtime images ship only `dist/`, so run it from a source checkout with
  * the target environment's variables: MONGODB_URI, the S3/SeaweedFS variables
@@ -100,7 +102,8 @@ async function liveDeps(): Promise<{ deps: RepairDeps; connectionManager: Connec
   return { deps, connectionManager };
 }
 
-async function main(): Promise<void> {
+/** Returns the number of topics that failed, after logging the summary. */
+async function main(): Promise<number> {
   const { dryRun, userId } = parseArgs(process.argv.slice(2));
   await connectDatabase();
 
@@ -129,13 +132,17 @@ async function main(): Promise<void> {
   }
   const { plans: _plans, ...summary } = report;
   log.info(summary, dryRun ? "Launch repair dry run finished; nothing was written" : "Launch repair finished");
+  if (report.topicsFailed > 0) {
+    log.error({ topicsFailed: report.topicsFailed }, "Some topics failed and were skipped; see the errors above, fix the cause and rerun (the repair is idempotent)");
+  }
 
   await connectionManager?.shutdown();
   await mongoose.disconnect();
+  return report.topicsFailed;
 }
 
 main()
-  .then(() => process.exit(0))
+  .then((topicsFailed) => process.exit(topicsFailed > 0 ? 1 : 0))
   .catch((err) => {
     log.fatal({ err }, "Launch repair failed");
     process.exit(1);

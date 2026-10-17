@@ -14,6 +14,7 @@ jest.mock("@services/s3Storage", () => ({
 import { useMongoMemoryServer, buildTestApp, TEST_USER_HEADER } from "../test/mongo";
 import topicRoutes from "@routes/topicRoutes";
 import { Topic } from "@models/Topic";
+import { toQuestionBankView } from "@services/questionBankView";
 import { Publishers } from "@services/rabbitmq/index";
 
 useMongoMemoryServer();
@@ -87,7 +88,7 @@ describe("POST /api/topics/:id/questions/regenerate", () => {
     expect(res.status).toBe(404);
     expect(res.body.error.code).toBe("TOPIC_NOT_FOUND");
     expect(bankPublish).not.toHaveBeenCalled();
-    expect((await Topic.findById(topic._id).lean())!.questionBank.state).toBe("none");
+    expect(toQuestionBankView((await Topic.findById(topic._id).lean())!.questionBank).state).toBe("none");
   });
 });
 

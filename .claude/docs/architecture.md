@@ -207,9 +207,14 @@ publish one message:
 - attachments pending or processing past `ATTACHMENT_STALE_MS` are written
   `failed` with `errorReason: "Processing timed out"`, then the settle check
   runs for the topic;
-- banks left `queued` or `building` past `STALE_CLAIM_MS` (a lost publish, a dead
-  worker) are republished, up to `SWEEP_MAX_ATTEMPTS`, then marked `failed`
-  with `errorCode: "BUILD_STALLED"`.
+- a bank left `building` past `STALE_CLAIM_MS` (a dead worker) is republished
+  without releasing its claim; the request takes the stale claim over;
+- a bank left `queued` past `STALE_CLAIM_MS` is republished only once the
+  `question_bank` queue has no ready messages (the publish really was lost).
+  While the queue still holds messages, e.g. during the launch backfill, or
+  when the check fails, queued banks are left alone and keep their attempts;
+- each republish counts toward `SWEEP_MAX_ATTEMPTS`; past it the bank is marked
+  `failed` with `errorCode: "BUILD_STALLED"`.
 
 Bank states: `none → queued → building → ready | empty | failed`, back to
 `queued` on any trigger, and to `none` when the last material is removed.

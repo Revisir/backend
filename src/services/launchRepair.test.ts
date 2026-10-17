@@ -194,6 +194,107 @@ describe("runLaunchRepair", () => {
     expect(calls).toEqual({ files: [], urls: [], banks: [] });
   });
 
+  it("counts a topic whose storage listing fails, and still repairs the others and queues their bank builds", async () => {
+    // Created first, so a run that is not isolated per topic stops before the others.
+    const broken = await seedTopic({ topicName: "Broken", urls: [{ url: "https://broken.example", processingStatus: "completed", extractedContentPath: "p", statusUpdatedAt: LONG_AGO }] });
+    const fine = await seedTopic({ topicName: "Fine", urls: [{ _id: oldId(), url: "https://a.example/x", processingStatus: "pending" }] });
+    const fineId = fine._id.toString();
+    const { deps, calls } = fakeDeps({ [extractedKeyForUrl(USER, fineId, "https://a.example/x")]: "text/plain" });
+    const list = deps.listObjects;
+    deps.listObjects = async (prefix) => {
+      if (prefix.includes(broken._id.toString())) throw new Error("SlowDown: Please reduce your request rate.");
+      return list(prefix);
+    };
+
+    const report = await run(deps);
+
+    expect(report).toMatchObject({ topicsScanned: 2, topicsFailed: 1, topicsChanged: 1, urlsCompleted: 1, bankBuildsQueued: 1 });
+    expect(report.plans.map((p) => p.topicId)).toEqual([fineId]);
+    expect((await Topic.findById(fineId).lean())!.urls[0].processingStatus).toBe("completed");
+    expect(calls.banks).toEqual([fineId]);
+  });
+
+  it("counts a topic whose bank build cannot be queued, and still queues the rest", async () => {
+    const material = (url: string) => ({ url, processingStatus: "completed", extractedContentPath: "p", statusUpdatedAt: LONG_AGO });
+    const first = await seedTopic({ revisionDate: new Date("2026-09-01T00:00:00.000Z"), urls: [material("https://first.example")] });
+    const second = await seedTopic({ revisionDate: new Date("2026-09-02T00:00:00.000Z"), urls: [material("https://second.example")] });
+    const { deps, calls } = fakeDeps({});
+    deps.queueBankBuild = async (topicId) => {
+      if (topicId === first._id.toString()) throw new Error("MongoNetworkError: connection reset");
+      calls.banks.push(topicId);
+    };
+
+    const report = await run(deps);
+
+    expect(report).toMatchObject({ topicsFailed: 1, bankBuildsQueued: 1 });
+    expect(calls.banks).toEqual([second._id.toString()]);
+  });
+
+  it("does not overwrite an entry a worker settled between planning and applying", async () => {
+    const topic = await seedTopic({
+      urls: [
+        { _id: oldId(), url: "https://a.example/x", processingStatus: "pending" },
+        { _id: oldId(), url: "https://b.example/y", processingStatus: "pending" },
+      ],
+    });
+    const id = topic._id.toString();
+    const toComplete = `${USER}/${id}/files/done.pdf`;
+    const toRepublish = `${USER}/${id}/files/waiting.pdf`;
+    await Topic.updateOne(
+      { _id: topic._id },
+      { $push: { files: { $each: [toComplete, toRepublish].map((s3Path) => ({ _id: oldId(), fileName: s3Path.split("/").at(-1), fileType: "pdf", s3Path, s3Bucket: BUCKET, processingStatus: "pending" })) } } },
+    );
+    const objects = {
+      [toComplete]: "application/pdf",
+      [toRepublish]: "application/pdf",
+      [extractedKeyForFile(USER, id, "done.pdf")]: "text/plain",
+      [extractedKeyForUrl(USER, id, "https://a.example/x")]: "text/plain",
+    };
+    const { deps, calls } = fakeDeps(objects);
+    // The run has read the topic; workers settle every entry before the repair is applied.
+    const WORKER_AT = new Date(NOW.getTime() - 1_000);
+    const list = deps.listObjects;
+    deps.listObjects = async (prefix) => {
+      await Topic.updateOne(
+        { _id: topic._id },
+        {
+          $set: {
+            "urls.0.processingStatus": "completed",
+            "urls.0.extractedContentPath": "worker/a.md",
+            "urls.0.statusUpdatedAt": WORKER_AT,
+            "urls.1.processingStatus": "completed",
+            "urls.1.extractedContentPath": "worker/b.md",
+            "urls.1.statusUpdatedAt": WORKER_AT,
+            "files.0.processingStatus": "failed",
+            "files.0.errorReason": "Unsupported file contents",
+            "files.0.statusUpdatedAt": WORKER_AT,
+            "files.1.processingStatus": "completed",
+            "files.1.extractedContentUrl": "worker/waiting.md",
+            "files.1.statusUpdatedAt": WORKER_AT,
+          },
+        },
+      );
+      return list(prefix);
+    };
+
+    const report = await run(deps);
+
+    // The plan was made from the stale read...
+    expect(report).toMatchObject({ filesCompleted: 1, filesRepublished: 1, urlsCompleted: 1, urlsRepublished: 1 });
+    // ...but no write landed on an entry that had settled since, and nothing was republished.
+    const after = (await Topic.findById(id).lean())!;
+    expect(after.urls.map((u) => [u.processingStatus, u.extractedContentPath, u.statusUpdatedAt?.toISOString()])).toEqual([
+      ["completed", "worker/a.md", WORKER_AT.toISOString()],
+      ["completed", "worker/b.md", WORKER_AT.toISOString()],
+    ]);
+    expect(after.files.map((f) => [f.processingStatus, f.errorReason ?? null, f.extractedContentUrl ?? null, f.statusUpdatedAt?.toISOString()])).toEqual([
+      ["failed", "Unsupported file contents", null, WORKER_AT.toISOString()],
+      ["completed", null, "worker/waiting.md", WORKER_AT.toISOString()],
+    ]);
+    expect(calls.files).toEqual([]);
+    expect(calls.urls).toEqual([]);
+  });
+
   it("limits the run to one user when asked", async () => {
     await seedTopic({ userId: "someone-else", urls: [{ url: "https://a.example", processingStatus: "completed", extractedContentPath: "p" }] });
     const mine = await seedTopic({ urls: [{ url: "https://b.example", processingStatus: "completed", extractedContentPath: "q" }] });

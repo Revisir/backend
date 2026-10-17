@@ -220,6 +220,16 @@ describe("claim protocol", () => {
 
 describe("sweep", () => {
   const staleClaim = QUESTION_BANK.STALE_CLAIM_MS / 60_000;
+  /** The `question_bank` queue holds no ready messages: a queued bank's message was lost. */
+  const queueEmpty = async () => 0;
+  const passesAfter = (start: Date, passes: number) => Array.from({ length: passes }, (_, i) => new Date(start.getTime() + (i + 1) * (staleClaim + 1) * 60_000));
+
+  async function queuedAt(now: Date) {
+    const topic = await seedTopic({ urls: [completedUrl("https://a.example")] });
+    await requestBankBuild({ topicId: topic._id.toString(), userId: USER, reason: "backfill", now });
+    publish.mockClear();
+    return topic;
+  }
 
   it("republishes a bank left queued by a lost publish, and marks it failed at the attempt cap", async () => {
     const topic = await seedTopic({ urls: [completedUrl("https://a.example")] });
@@ -230,27 +240,64 @@ describe("sweep", () => {
     let now = at(0);
     for (let attempt = 1; attempt <= QUESTION_BANK.SWEEP_MAX_ATTEMPTS; attempt++) {
       now = new Date(now.getTime() + (staleClaim + 1) * 60_000);
-      expect(await republishStalledBanks(now)).toEqual({ republished: 1, failed: 0 });
+      expect(await republishStalledBanks(queueEmpty, now)).toEqual({ republished: 1, failed: 0 });
       expect((await bankOf(topic._id)).attempts).toBe(attempt);
     }
     expect(published().filter((m) => m.reason === "sweep")).toHaveLength(QUESTION_BANK.SWEEP_MAX_ATTEMPTS);
 
     now = new Date(now.getTime() + (staleClaim + 1) * 60_000);
-    expect(await republishStalledBanks(now)).toEqual({ republished: 0, failed: 1 });
+    expect(await republishStalledBanks(queueEmpty, now)).toEqual({ republished: 0, failed: 1 });
     expect(await bankOf(topic._id)).toMatchObject({ state: "failed", errorCode: "BUILD_STALLED" });
   });
 
   it("leaves a recently queued bank alone", async () => {
     const topic = await seedTopic({ urls: [completedUrl("https://a.example")] });
     await requestBankBuild({ topicId: topic._id.toString(), userId: USER, reason: "materials_settled", now: at(0) });
-    expect(await republishStalledBanks(at(1))).toEqual({ republished: 0, failed: 0 });
+    expect(await republishStalledBanks(queueEmpty, at(1))).toEqual({ republished: 0, failed: 0 });
   });
 
-  it("releases an abandoned building claim and republishes it", async () => {
+  it("leaves a stale queued bank alone while the queue still has ready messages, past the attempt cap", async () => {
+    const topic = await queuedAt(at(0));
+    const backlog = jest.fn(async () => 3);
+
+    for (const now of passesAfter(at(0), QUESTION_BANK.SWEEP_MAX_ATTEMPTS + 2)) {
+      expect(await republishStalledBanks(backlog, now)).toEqual({ republished: 0, failed: 0 });
+    }
+
+    expect(backlog).toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+    expect(await bankOf(topic._id)).toMatchObject({ state: "queued", attempts: 0, requestedAt: at(0) });
+  });
+
+  it("republishes a stale queued bank once the queue has no ready messages", async () => {
+    const topic = await queuedAt(at(0));
+
+    expect(await republishStalledBanks(queueEmpty, at(staleClaim + 1))).toEqual({ republished: 1, failed: 0 });
+
+    expect(published().map((m) => [m.topicId, m.reason])).toEqual([[topic._id.toString(), "sweep"]]);
+    expect(await bankOf(topic._id)).toMatchObject({ state: "queued", attempts: 1 });
+  });
+
+  it("skips queued banks when the queue cannot be checked, but still republishes an abandoned building claim", async () => {
+    const queued = await queuedAt(at(0));
+    const building = await seedTopic({ urls: [completedUrl("https://b.example")], questionBank: { state: "building", claimedAt: at(0), claimRequestedAt: at(-1), requestedAt: at(-1), attempts: 0 } });
+    const unreachable = async (): Promise<number> => {
+      throw new Error("RabbitMQ channel is not available. Call connect() first.");
+    };
+
+    expect(await republishStalledBanks(unreachable, at(staleClaim + 1))).toEqual({ republished: 1, failed: 0 });
+
+    expect(published().map((m) => m.topicId)).toEqual([building._id.toString()]);
+    expect(await bankOf(queued._id)).toMatchObject({ state: "queued", attempts: 0 });
+  });
+
+  it("republishes an abandoned building claim without releasing it, and the request takes the claim over", async () => {
     const topic = await seedTopic({ urls: [completedUrl("https://a.example")], questionBank: { state: "building", claimedAt: at(0), claimRequestedAt: at(-1), requestedAt: at(-1) } });
 
-    await republishStalledBanks(at(staleClaim + 1));
+    await republishStalledBanks(queueEmpty, at(staleClaim + 1));
 
+    // The stale claim stays as it is; the republished request reclaims it on arrival.
+    expect(await bankOf(topic._id)).toMatchObject({ state: "building", claimedAt: at(0), attempts: 1 });
     const message = published().at(-1)!;
     expect(message.reason).toBe("sweep");
     await handleBankRequest(message, at(staleClaim + 2));

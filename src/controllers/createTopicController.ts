@@ -56,6 +56,15 @@ export async function createTopic(req: Request, res: Response): Promise<void> {
       files: [],
     });
 
+    // Issuing the upload URLs validates each declared file (type, size, path),
+    // so a rejected file fails the request before anything is saved.
+    const uploadUrls = await Promise.all(
+      (files ?? []).map(async (file) => ({
+        fileName: file.fileName,
+        uploadUrl: await generatePresignedUploadUrl(req.userId!, topic._id.toString(), file.fileName, file.contentType, file.size),
+      })),
+    );
+
     // A pending entry per declared file, so the topic page and the
     // all-attachments-settled check see uploads still on their way (KTD13).
     const declaredFiles = [...new Map((files ?? []).map((f) => [f.fileName, f])).values()];
@@ -72,12 +81,6 @@ export async function createTopic(req: Request, res: Response): Promise<void> {
       log.error({ err, topicId: topic._id.toString(), urls: publishable }, "Failed to record unqueued URLs");
     }
 
-    const uploadUrls =
-      files?.map((file) => ({
-        fileName: file.fileName,
-        uploadUrl: generatePresignedUploadUrl(req.userId!, topic._id.toString(), file.fileName, file.contentType, file.size),
-      })) || [];
-
     const response: CreateTopicResponse = {
       topicId: topic._id.toString(),
       topicName: topic.topicName,
@@ -86,12 +89,7 @@ export async function createTopic(req: Request, res: Response): Promise<void> {
       dateStudied: topic.dateStudied.toISOString(),
       revisionDate: topic.revisionDate.toISOString(),
       isDue: topic.isDue,
-      uploadUrls: await Promise.all(
-        uploadUrls.map(async (u) => ({
-          fileName: u.fileName,
-          uploadUrl: await u.uploadUrl,
-        })),
-      ),
+      uploadUrls,
     };
 
     res.status(201).json(response);

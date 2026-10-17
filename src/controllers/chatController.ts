@@ -181,8 +181,9 @@ export async function sendChatMessage(req: Request, res: Response): Promise<void
  * Complete revision session and update schedule.
  *
  * Idempotent per session: a session that already completed returns its stored
- * result. A topic already reviewed today (by any path) returns
- * ALREADY_REVIEWED_TODAY without spending an LLM call.
+ * result, and one that recorded its review without storing the result returns
+ * that review. A topic already reviewed today by another session or path
+ * returns ALREADY_REVIEWED_TODAY without spending an LLM call.
  */
 export async function completeChatSession(req: Request, res: Response): Promise<void> {
   try {
@@ -226,19 +227,23 @@ export async function completeChatSession(req: Request, res: Response): Promise<
     }
 
     const day = getLearnerDay(req);
-    if (isReviewedToday(topic, day)) {
+    // This session recorded today's review but its result never reached the
+    // session (a crash, or a concurrent completion still saving): replay it.
+    const reviewedToday = isReviewedToday(topic, day);
+    const replaying = reviewedToday && String(topic.lastReviewSessionId) === String(chatSession._id);
+    if (reviewedToday && !replaying) {
       sendAlreadyReviewed(res);
       return;
     }
 
-    // LLM evaluates session quality from conversation history
-    const llmQuality = await assessStudentPerformance(chatSession.messages);
+    // LLM evaluates session quality from conversation history; a replay returns the recorded score.
+    const llmQuality = replaying ? null : await assessStudentPerformance(chatSession.messages);
 
     log.info({ userId: req.userId!, topicId: topic._id, userQuality, llmQuality }, "Recording revision");
 
     let result: { nextRevisionDate: Date; finalQuality: number };
     try {
-      // A concurrent completion of this same session returns that completion's review.
+      // When this session already holds the day, this returns the review it recorded.
       result = await recordRevision({ userId: req.userId!, topicId: topic._id, userQuality, llmQuality, method: "ai_quiz", sessionId: chatSession._id, day });
     } catch (err) {
       if (!(err instanceof AlreadyReviewedTodayError)) throw err;
@@ -267,7 +272,7 @@ function toCompleteResponse(result: { nextRevisionDate: Date; finalQuality: numb
   return { nextRevisionDate: new Date(result.nextRevisionDate).toISOString(), finalQuality: result.finalQuality };
 }
 
+/** The topic's learner-day is held by another review. */
 function sendAlreadyReviewed(res: Response): void {
-  const error = new AlreadyReviewedTodayError();
-  res.status(error.status).json({ error: { code: error.code, message: error.message } } as ErrorResponse);
+  res.status(409).json({ error: { code: "ALREADY_REVIEWED_TODAY", message: "This topic has already been reviewed today" } } as ErrorResponse);
 }

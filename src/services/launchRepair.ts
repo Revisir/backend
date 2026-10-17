@@ -82,6 +82,8 @@ export interface RepairReport {
   urlsRepublished: number;
   lastQualityBackfilled: number;
   bankBuildsQueued: number;
+  /** Topics whose repair or bank build threw; logged and skipped. A rerun retries them. */
+  topicsFailed: number;
   /** Per changed topic, for the dry-run review. */
   plans: TopicRepairPlan[];
 }
@@ -91,6 +93,15 @@ function isStuck(att: AttachmentLike & { errorReason?: string | null }, now: Dat
   if (att.processingStatus === "failed") return att.errorReason === STALE_ATTACHMENT_REASON;
   return isStale(att, now);
 }
+
+/**
+ * The entry is still stuck in the database: unsettled (a missing status reads
+ * as pending), or failed by the sweep. Guards every repair write, so an entry
+ * a worker settled after the scan read it is left as the worker wrote it.
+ */
+const STILL_STUCK = {
+  $or: [{ processingStatus: { $in: ["pending", "processing", null] } }, { processingStatus: "failed", errorReason: STALE_ATTACHMENT_REASON }],
+};
 
 /**
  * Plans one topic's attachment and rating repairs. Pure. Every upload that
@@ -177,35 +188,44 @@ async function applyTopicRepair(plan: TopicRepairPlan, bucket: string, deps: Rep
   }
 
   for (const file of plan.completeFiles) {
-    await Topic.updateOne(
-      { _id: topicId, userId, "files.s3Path": file.key },
+    const done = await Topic.updateOne(
+      { _id: topicId, userId, files: { $elemMatch: { s3Path: file.key, ...STILL_STUCK } } },
       { $set: { "files.$.processingStatus": "completed", "files.$.extractedContentUrl": file.extractedPath, "files.$.statusUpdatedAt": now, "files.$.errorReason": null } },
     );
+    if (!done.matchedCount) log.info({ topicId, key: file.key }, "File settled since the scan; left as it is");
   }
 
   for (const url of plan.completeUrls) {
-    await Topic.updateOne(
-      { _id: topicId, userId, "urls.url": url.url },
+    const done = await Topic.updateOne(
+      { _id: topicId, userId, urls: { $elemMatch: { url: url.url, ...STILL_STUCK } } },
       { $set: { "urls.$.processingStatus": "completed", "urls.$.extractedContentPath": url.extractedPath, "urls.$.statusUpdatedAt": now, "urls.$.errorReason": null } },
     );
+    if (!done.matchedCount) log.info({ topicId, url: url.url }, "URL settled since the scan; left as it is");
   }
 
-  // Republished attachments restart their staleness window as pending.
+  // Republished attachments restart their staleness window as pending. One
+  // that settled since the scan is neither reset nor republished.
   for (const key of plan.republishFiles) {
-    await Topic.updateOne(
-      { _id: topicId, userId, "files.s3Path": key },
+    const reset = await Topic.updateOne(
+      { _id: topicId, userId, files: { $elemMatch: { s3Path: key, ...STILL_STUCK } } },
       { $set: { "files.$.processingStatus": "pending", "files.$.statusUpdatedAt": now, "files.$.errorReason": null } },
     );
+    if (!reset.matchedCount) {
+      log.info({ topicId, key }, "File settled since the scan; not republished");
+      continue;
+    }
     if (!(await deps.publishFile(key))) log.error({ topicId, key }, "Failed to republish file for extraction");
   }
-  if (plan.republishUrls.length) {
-    await Topic.updateOne(
-      { _id: topicId, userId },
-      { $set: { "urls.$[elem].processingStatus": "pending", "urls.$[elem].statusUpdatedAt": now, "urls.$[elem].errorReason": null } },
-      { arrayFilters: [{ "elem.url": { $in: plan.republishUrls } }] },
+  const resetUrls: string[] = [];
+  for (const url of plan.republishUrls) {
+    const reset = await Topic.updateOne(
+      { _id: topicId, userId, urls: { $elemMatch: { url, ...STILL_STUCK } } },
+      { $set: { "urls.$.processingStatus": "pending", "urls.$.statusUpdatedAt": now, "urls.$.errorReason": null } },
     );
-    if (!(await deps.publishUrls(topicId, userId, plan.republishUrls))) log.error({ topicId }, "Failed to republish URLs for extraction");
+    if (reset.matchedCount) resetUrls.push(url);
+    else log.info({ topicId, url }, "URL settled since the scan; not republished");
   }
+  if (resetUrls.length && !(await deps.publishUrls(topicId, userId, resetUrls))) log.error({ topicId }, "Failed to republish URLs for extraction");
 
   if (plan.lastQuality !== null) {
     await Topic.updateOne({ _id: topicId, userId, lastQuality: null }, { $set: { lastQuality: plan.lastQuality } });
@@ -242,8 +262,41 @@ function afterRepair(topic: RepairTopic, plan: TopicRepairPlan, now: Date): Repa
 }
 
 /**
+ * Reads one topic's storage, plans its repair and, unless dry, applies it.
+ * Returns the plan, or null when the topic needs nothing.
+ */
+async function repairTopic(topic: RepairTopic, options: { dryRun: boolean; bucket: string; deps: RepairDeps; now: Date }): Promise<TopicRepairPlan | null> {
+  const { dryRun, bucket, deps, now } = options;
+  const topicId = topic._id.toString();
+  const prefix = `${topic.userId}/${topicId}`;
+
+  const [stored, latest] = await Promise.all([
+    deps.listObjects(`${prefix}/`),
+    topic.lastQuality == null ? RevisionRecord.findOne({ userId: topic.userId, topicId: topic._id }).sort({ revisionDate: -1 }).select("finalQuality").lean() : null,
+  ]);
+  const extractedKeys = new Set(stored.filter((o) => o.key.startsWith(`${prefix}/extracted/`)).map((o) => o.key));
+  const entryKeys = new Set((topic.files ?? []).map((f) => f.s3Path));
+  const uploads = await Promise.all(
+    stored
+      .filter((o) => o.key.startsWith(`${prefix}/files/`))
+      .map(async (o) => (entryKeys.has(o.key) ? o : { ...o, contentType: await deps.contentTypeOf(o.key) })),
+  );
+
+  const plan = planTopicRepair({ topic, uploads, extractedKeys, latestQuality: latest?.finalQuality, now });
+  const repaired = afterRepair(topic, plan, now);
+  const bankState = topic.questionBank?.state ?? "none";
+  plan.queueBank = bankState === "none" && hasCompletedMaterial(repaired) && allSettled(repaired, now);
+  if (!hasChanges(plan)) return null;
+
+  if (!dryRun) await applyTopicRepair(plan, bucket, deps, now);
+  return plan;
+}
+
+/**
  * Runs the repair across every topic (or one user's). In a dry run nothing is
  * written or published, and the report holds the same plan a real run makes.
+ * A topic whose repair or bank build throws is logged, counted in
+ * `topicsFailed` and skipped; the run carries on with the rest.
  */
 export async function runLaunchRepair(options: { dryRun: boolean; bucket: string; deps: RepairDeps; userId?: string; now?: Date }): Promise<RepairReport> {
   const { dryRun, bucket, deps, userId, now = new Date() } = options;
@@ -258,6 +311,7 @@ export async function runLaunchRepair(options: { dryRun: boolean; bucket: string
     urlsRepublished: 0,
     lastQualityBackfilled: 0,
     bankBuildsQueued: 0,
+    topicsFailed: 0,
     plans: [],
   };
 
@@ -271,26 +325,17 @@ export async function runLaunchRepair(options: { dryRun: boolean; bucket: string
   for await (const doc of cursor) {
     const topic = doc as unknown as RepairTopic;
     report.topicsScanned += 1;
-    const topicId = topic._id.toString();
-    const prefix = `${topic.userId}/${topicId}`;
 
-    const [stored, latest] = await Promise.all([
-      deps.listObjects(`${prefix}/`),
-      topic.lastQuality == null ? RevisionRecord.findOne({ userId: topic.userId, topicId: topic._id }).sort({ revisionDate: -1 }).select("finalQuality").lean() : null,
-    ]);
-    const extractedKeys = new Set(stored.filter((o) => o.key.startsWith(`${prefix}/extracted/`)).map((o) => o.key));
-    const entryKeys = new Set((topic.files ?? []).map((f) => f.s3Path));
-    const uploads = await Promise.all(
-      stored
-        .filter((o) => o.key.startsWith(`${prefix}/files/`))
-        .map(async (o) => (entryKeys.has(o.key) ? o : { ...o, contentType: await deps.contentTypeOf(o.key) })),
-    );
-
-    const plan = planTopicRepair({ topic, uploads, extractedKeys, latestQuality: latest?.finalQuality, now });
-    const repaired = afterRepair(topic, plan, now);
-    const bankState = topic.questionBank?.state ?? "none";
-    plan.queueBank = bankState === "none" && hasCompletedMaterial(repaired) && allSettled(repaired, now);
-    if (!hasChanges(plan)) continue;
+    let plan: TopicRepairPlan | null;
+    try {
+      plan = await repairTopic(topic, { dryRun, bucket, deps, now });
+    } catch (err) {
+      // Some of this topic's writes may have landed; every one is idempotent, so a rerun finishes it.
+      report.topicsFailed += 1;
+      log.error({ err, topicId: topic._id.toString() }, "Topic repair failed; skipped");
+      continue;
+    }
+    if (!plan) continue;
 
     report.topicsChanged += 1;
     report.fileEntriesCreated += plan.newFileEntries.length;
@@ -301,15 +346,18 @@ export async function runLaunchRepair(options: { dryRun: boolean; bucket: string
     if (plan.lastQuality !== null) report.lastQualityBackfilled += 1;
     report.plans.push(plan);
     if (plan.queueBank) bankCandidates.push(plan);
-
-    if (!dryRun) await applyTopicRepair(plan, bucket, deps, now);
   }
 
   // Due topics first: they are the ones a learner will try to quiz on soonest.
   bankCandidates.sort((a, b) => a.revisionDate.getTime() - b.revisionDate.getTime());
   for (const plan of bankCandidates) {
-    report.bankBuildsQueued += 1;
-    if (!dryRun) await deps.queueBankBuild(plan.topicId, plan.userId);
+    try {
+      if (!dryRun) await deps.queueBankBuild(plan.topicId, plan.userId);
+      report.bankBuildsQueued += 1;
+    } catch (err) {
+      report.topicsFailed += 1;
+      log.error({ err, topicId: plan.topicId }, "Failed to queue bank build; skipped");
+    }
   }
 
   return report;

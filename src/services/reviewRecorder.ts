@@ -11,7 +11,6 @@ const log = logger.child({ module: "reviewRecorder" });
 /** Thrown when the topic already has a review in the learner's current day. */
 export class AlreadyReviewedTodayError extends Error {
   readonly code = "ALREADY_REVIEWED_TODAY";
-  readonly status = 409;
   constructor() {
     super("This topic has already been reviewed today");
     this.name = "AlreadyReviewedTodayError";
@@ -21,7 +20,6 @@ export class AlreadyReviewedTodayError extends Error {
 /** Thrown when the topic does not exist or belongs to another user. */
 export class TopicNotFoundError extends Error {
   readonly code = "TOPIC_NOT_FOUND";
-  readonly status = 404;
   constructor() {
     super("Topic not found or access denied");
     this.name = "TopicNotFoundError";

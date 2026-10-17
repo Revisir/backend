@@ -1,4 +1,4 @@
-import { learnerDayFromHeader, getLearnerDay, isReviewedToday, isDueToday } from "@services/learnerDay";
+import { learnerDayFromHeader, getLearnerDay, isReviewedToday, isDueToday, changedStudyDate } from "@services/learnerDay";
 import type { Request } from "express";
 
 describe("learnerDayFromHeader", () => {
@@ -66,5 +66,27 @@ describe("isReviewedToday / isDueToday", () => {
     expect(isDueToday({ revisionDate: new Date("2026-03-10T03:59:00.000Z") }, day)).toBe(true);
     expect(isDueToday({ revisionDate: new Date("2026-03-01T00:00:00.000Z") }, day)).toBe(true);
     expect(isDueToday({ revisionDate: new Date("2026-03-10T04:00:00.000Z") }, day)).toBe(false);
+  });
+});
+
+describe("changedStudyDate", () => {
+  const day = learnerDayFromHeader("America/New_York", new Date("2026-03-10T12:00:00.000Z"));
+  // Topic creation stores a date-only value as UTC midnight; New York shows it as 2026-01-14.
+  const stored = new Date("2026-01-15T00:00:00.000Z");
+
+  it("reports no change when the submitted date is the stored instant", () => {
+    expect(changedStudyDate("2026-01-15", stored, day)).toBeNull();
+  });
+
+  it("reports no change when the submitted date is the stored date in the learner's zone", () => {
+    expect(changedStudyDate("2026-01-14", stored, day)).toBeNull();
+  });
+
+  it("reports no change for a full ISO value equal to the stored instant", () => {
+    expect(changedStudyDate("2026-01-15T00:00:00.000Z", stored, day)).toBeNull();
+  });
+
+  it("returns UTC midnight of a changed date-only value", () => {
+    expect(changedStudyDate("2026-01-16", stored, day)).toEqual(new Date("2026-01-16T00:00:00.000Z"));
   });
 });

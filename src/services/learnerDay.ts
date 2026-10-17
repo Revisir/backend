@@ -84,9 +84,14 @@ const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
  * sends that date back unchanged, so the comparison is made in the learner's
  * zone (KTD20). A changed date-only value is stored as UTC midnight of that
  * day, as topic creation does; a full ISO value is stored as given.
+ *
+ * A value that parses to the stored instant is never a change: west of UTC the
+ * form shows a UTC-midnight date as the day before, and typing the stored date
+ * back in would otherwise reset the schedule while storing the same value.
  */
 export function changedStudyDate(submitted: string, stored: Date, day: LearnerDay): Date | null {
   const next = DATE_ONLY.test(submitted) ? new Date(`${submitted}T00:00:00.000Z`) : new Date(submitted);
+  if (next.getTime() === new Date(stored).getTime()) return null;
   const nextLocal = DATE_ONLY.test(submitted) ? submitted : localDateOf(next, day);
   return nextLocal === localDateOf(stored, day) ? null : next;
 }

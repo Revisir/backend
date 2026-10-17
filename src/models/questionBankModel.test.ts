@@ -23,11 +23,11 @@ async function topicWithBank() {
 }
 
 describe("Topic question bank fields", () => {
-  it("defaults a new topic's bank to none with no questions", async () => {
+  it("reads a new topic's bank as none with no questions", async () => {
     const topic = await Topic.create({ userId: "user-1", topicName: "T", subjectName: "S", dateStudied: new Date(), revisionDate: new Date() });
     const lean = await Topic.findById(topic._id).lean();
 
-    expect(lean!.questionBank).toMatchObject({ state: "none", usableCount: 0, requestedAt: null, attempts: 0 });
+    expect(toQuestionBankView(lean!.questionBank)).toEqual({ state: "none", usableCount: 0, rebuilding: false });
     expect(lean!.lastQuality).toBeNull();
   });
 
@@ -73,6 +73,38 @@ describe("Topic question bank fields", () => {
     const lean = await Topic.findById(insertedId).lean();
 
     expect(toQuestionBankView(lean!.questionBank)).toEqual({ state: "none", usableCount: 0, rebuilding: false });
+  });
+});
+
+describe("saving a topic loaded before a concurrent bank write", () => {
+  const legacy = { userId: "user-1", topicName: "Legacy", subjectName: "S", dateStudied: new Date(), revisionDate: new Date() };
+
+  it("keeps a bank build that landed after the load", async () => {
+    const claimedAt = new Date("2026-10-01T10:00:00.000Z");
+    const { insertedId } = await Topic.collection.insertOne({ ...legacy, questionBank: { state: "building", claimedAt } });
+
+    const doc = await Topic.findById(insertedId);
+    await Topic.collection.updateOne({ _id: insertedId }, { $set: { "questionBank.usableCount": 7, "questionBank.state": "ready" } });
+    doc!.topicName = "Renamed";
+    await doc!.save();
+
+    const raw = await Topic.collection.findOne({ _id: insertedId });
+    expect(raw!.topicName).toBe("Renamed");
+    expect(raw!.questionBank).toMatchObject({ state: "ready", usableCount: 7 });
+    expect(raw!.questionBank).not.toHaveProperty("attempts");
+  });
+
+  it("keeps a bank claim on a topic saved before banks existed", async () => {
+    const { insertedId } = await Topic.collection.insertOne({ ...legacy });
+
+    const doc = await Topic.findById(insertedId);
+    await Topic.collection.updateOne({ _id: insertedId }, { $set: { "questionBank.state": "building" } });
+    doc!.topicName = "Renamed";
+    await doc!.save();
+
+    const raw = await Topic.collection.findOne({ _id: insertedId });
+    expect(raw!.topicName).toBe("Renamed");
+    expect(raw!.questionBank.state).toBe("building");
   });
 });
 

@@ -573,7 +573,7 @@ export async function markTopicRevised(req: Request, res: Response): Promise<voi
     });
   } catch (error) {
     if (error instanceof TopicNotFoundError || error instanceof AlreadyReviewedTodayError) {
-      res.status(error.status).json({
+      res.status(error instanceof TopicNotFoundError ? 404 : 409).json({
         error: { code: error.code, message: error.message },
       } as ErrorResponse);
       return;

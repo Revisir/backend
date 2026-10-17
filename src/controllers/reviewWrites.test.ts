@@ -281,6 +281,41 @@ describe("POST /api/chat/complete", () => {
     expect(assessStudentPerformance).not.toHaveBeenCalled();
     expect(await RevisionRecord.countDocuments({ topicId: topic._id })).toBe(1);
   });
+
+  it("returns the review this session recorded when its result never reached the session", async () => {
+    freezeDate(new Date("2026-03-10T15:00:00.000Z"));
+    const topic = await createTopic();
+    const chat = await createChat(topic._id);
+    // The review landed, then the request died before the session stored its result.
+    const recorded = await recordRevision({ userId: USER, topicId: topic._id, userQuality: 4, llmQuality: 3, method: "ai_quiz", sessionId: chat._id, day: learnerDayFromHeader(undefined) });
+
+    const res = await request(app).post("/api/chat/complete").send({ sessionId: chat._id.toString(), topicId: topic._id.toString(), userQuality: 5 });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ nextRevisionDate: recorded.nextRevisionDate.toISOString(), finalQuality: recorded.finalQuality });
+    expect(assessStudentPerformance).not.toHaveBeenCalled();
+    expect(await RevisionRecord.countDocuments({ topicId: topic._id })).toBe(1);
+    const session = (await ChatSession.findById(chat._id).lean())!;
+    expect(session.result!.finalQuality).toBe(recorded.finalQuality);
+    expect(new Date(session.result!.nextRevisionDate).toISOString()).toBe(recorded.nextRevisionDate.toISOString());
+    expect(session.active).toBe(false);
+    expect(session.completedAt).not.toBeNull();
+  });
+
+  it("returns ALREADY_REVIEWED_TODAY when another chat session reviewed the topic today", async () => {
+    freezeDate(new Date("2026-03-10T15:00:00.000Z"));
+    const topic = await createTopic();
+    const other = await createChat(topic._id);
+    await recordRevision({ userId: USER, topicId: topic._id, userQuality: 4, llmQuality: 4, method: "ai_quiz", sessionId: other._id, day: learnerDayFromHeader(undefined) });
+    const chat = await createChat(topic._id);
+
+    const res = await request(app).post("/api/chat/complete").send({ sessionId: chat._id.toString(), topicId: topic._id.toString(), userQuality: 5 });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: { code: "ALREADY_REVIEWED_TODAY", message: "This topic has already been reviewed today" } });
+    expect(assessStudentPerformance).not.toHaveBeenCalled();
+    expect((await ChatSession.findById(chat._id).lean())!.result).toBeNull();
+  });
 });
 
 describe("POST /api/chat/start", () => {

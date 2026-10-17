@@ -150,13 +150,35 @@ export async function failStaleAttachments(now: Date = new Date()): Promise<numb
   return topics.length;
 }
 
+/** Ready (not yet delivered) messages on the `question_bank` queue. */
+export type PendingBankMessages = () => Promise<number>;
+
 /**
- * Banks left queued or building past the stale-claim timeout (a lost publish,
- * or a worker that died) are republished, up to the attempt cap; then failed.
+ * Whether the queue has no ready messages, so a stale queued bank's message
+ * was really lost rather than still waiting behind the prefetch-1 consumer
+ * (the launch backfill queues every eligible topic at once). Not knowing
+ * counts as not drained.
  */
-export async function republishStalledBanks(now: Date = new Date()): Promise<{ republished: number; failed: number }> {
+async function bankQueueDrained(pendingBankMessages: PendingBankMessages): Promise<boolean> {
+  try {
+    const pending = await pendingBankMessages();
+    if (pending > 0) log.info({ pending }, "Question bank queue still has ready messages; leaving queued banks to it");
+    return pending === 0;
+  } catch (err) {
+    log.warn({ err }, "Could not check the question bank queue; leaving queued banks until the next sweep");
+    return false;
+  }
+}
+
+/**
+ * Banks left building past the stale-claim timeout (a worker that died), and
+ * banks left queued past it once the queue has drained (a lost publish), are
+ * republished, up to the attempt cap; then failed. A queued bank skipped
+ * because the queue still holds messages keeps its attempts.
+ */
+export async function republishStalledBanks(pendingBankMessages: PendingBankMessages, now: Date = new Date()): Promise<{ republished: number; failed: number }> {
   const staleBefore = new Date(now.getTime() - QUESTION_BANK.STALE_CLAIM_MS);
-  const topics = await Topic.find({
+  const stale = await Topic.find({
     $or: [
       { "questionBank.state": "queued", $or: [{ "questionBank.requestedAt": { $lt: staleBefore } }, { "questionBank.requestedAt": null }] },
       { "questionBank.state": "building", $or: [{ "questionBank.claimedAt": { $lt: staleBefore } }, { "questionBank.claimedAt": null }] },
@@ -164,6 +186,10 @@ export async function republishStalledBanks(now: Date = new Date()): Promise<{ r
   })
     .select("_id userId questionBank.state questionBank.attempts")
     .lean();
+
+  const anyQueued = stale.some((topic) => topic.questionBank?.state === "queued");
+  const queuedLost = anyQueued && (await bankQueueDrained(pendingBankMessages));
+  const topics = queuedLost ? stale : stale.filter((topic) => topic.questionBank?.state !== "queued");
 
   let republished = 0;
   let failed = 0;
@@ -186,10 +212,8 @@ export async function republishStalledBanks(now: Date = new Date()): Promise<{ r
       failed += 1;
       continue;
     }
-    if (topic.questionBank.state === "building") {
-      // Release the abandoned claim so the republished request can take it.
-      await Topic.updateOne({ _id: topic._id, userId: topic.userId, "questionBank.state": "building" }, { $set: { "questionBank.state": "queued" } });
-    }
+    // A stale building claim stays as it is: requestBankBuild raises requestedAt
+    // and publishes, and the request takes over a claim past the stale timeout.
     await requestBankBuild({ topicId, userId: topic.userId, reason: "sweep", now });
     republished += 1;
   }
@@ -197,22 +221,22 @@ export async function republishStalledBanks(now: Date = new Date()): Promise<{ r
 }
 
 /** One sweep pass. */
-async function sweepQuestionBanks(now: Date = new Date()): Promise<void> {
+async function sweepQuestionBanks(pendingBankMessages: PendingBankMessages, now: Date = new Date()): Promise<void> {
   const staleTopics = await failStaleAttachments(now);
-  const banks = await republishStalledBanks(now);
+  const banks = await republishStalledBanks(pendingBankMessages, now);
   if (staleTopics || banks.republished || banks.failed) log.info({ staleTopics, ...banks }, "Question bank sweep finished");
 }
 
 let sweepTimer: NodeJS.Timeout | null = null;
 
 /** Starts the periodic sweep. Overlapping passes are skipped. */
-export function startQuestionBankSweep(intervalMs: number = QUESTION_BANK.SWEEP_INTERVAL_MS): void {
+export function startQuestionBankSweep(pendingBankMessages: PendingBankMessages, intervalMs: number = QUESTION_BANK.SWEEP_INTERVAL_MS): void {
   if (sweepTimer) return;
   let running = false;
   sweepTimer = setInterval(() => {
     if (running) return;
     running = true;
-    sweepQuestionBanks()
+    sweepQuestionBanks(pendingBankMessages)
       .catch((err) => log.error({ err }, "Question bank sweep failed"))
       .finally(() => {
         running = false;
@@ -233,6 +257,9 @@ export async function startQuestionBankConsumer(connectionManager: ConnectionMan
     schema: questionBankMessageSchema,
   });
 
-  startQuestionBankSweep();
+  // The queue was declared by the publisher above, so the passive check cannot 404 the channel.
+  const pendingBankMessages: PendingBankMessages = async () =>
+    (await connectionManager.getChannel().checkQueue(RABBITMQ_CONFIG.QUESTION_BANK_QUEUE)).messageCount;
+  startQuestionBankSweep(pendingBankMessages);
   log.info("Question bank consumer and sweep started");
 }
