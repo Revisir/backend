@@ -5,13 +5,12 @@ import { generateMindMap } from "@services/mindMapGenerator.js";
 import { generatePresignedUploadUrl, deleteTopicFiles, deleteFile, deleteByPath, getSignedContentUrl } from "@services/s3Storage.js";
 import { recordRevision, AlreadyReviewedTodayError, TopicNotFoundError } from "@services/reviewRecorder.js";
 import { getLearnerDay, changedStudyDate } from "@services/learnerDay.js";
-import { withReviewState, type ReviewContext } from "@services/reviewAvailability.js";
+import { withReviewState, reviewContextFor } from "@services/reviewAvailability.js";
 import { retentionAt } from "@services/sm2Algorithm.js";
-import { isAIConfigured } from "@middleware/aiConfigCheck.js";
 import { GetTopicsResponse } from "$types/topic.types.js";
 import { ErrorResponse } from "$types/common.types.js";
 import { getTopicsQuerySchema, topicIdParamSchema, topicFileParamSchema, markRevisedSchema, updateTopicSchema } from "@/schemas/index.js";
-import { applyUrlListUpdate, upsertPendingFileEntries, afterAttachmentRemoved } from "@services/topicMaterials.js";
+import { applyUrlListUpdate, upsertPendingFileEntries, afterAttachmentRemoved, filterPublishableUrls } from "@services/topicMaterials.js";
 import { z } from "zod";
 import { logger } from "@config/logger.js";
 
@@ -125,9 +124,7 @@ export async function getTopicById(req: Request, res: Response): Promise<void> {
     const urls = (topic.urls || []).map(({ errorReason, ...url }) => ({ ...url, ...statusFields({ processingStatus: url.processingStatus, errorReason }) }));
 
     // Review fields come from the stored attachments, before files and URLs are reshaped.
-    const day = getLearnerDay(req);
-    const ctx: ReviewContext = { day, now: day.now, aiConfigured: isAIConfigured() };
-    res.status(200).json({ ...withReviewState(topic, ctx), files, urls });
+    res.status(200).json({ ...withReviewState(topic, reviewContextFor(req)), files, urls });
   } catch (error) {
     log.error({ err: error }, "Error fetching topic by ID");
 
@@ -147,8 +144,8 @@ export async function getTopicById(req: Request, res: Response): Promise<void> {
  */
 export async function getDueTopics(req: Request, res: Response): Promise<void> {
   try {
-    const day = getLearnerDay(req);
-    const ctx: ReviewContext = { day, now: day.now, aiConfigured: isAIConfigured() };
+    const ctx = reviewContextFor(req);
+    const { day } = ctx;
     // Due today in the learner's zone, plus anything already finished today so
     // the queue can keep showing it as done for the rest of the day (R12).
     // Bank questions and the retired list are select: false and stay out.
@@ -576,7 +573,7 @@ export async function markTopicRevised(req: Request, res: Response): Promise<voi
     });
   } catch (error) {
     if (error instanceof TopicNotFoundError || error instanceof AlreadyReviewedTodayError) {
-      res.status(error instanceof TopicNotFoundError ? 404 : 409).json({
+      res.status(error.status).json({
         error: { code: error.code, message: error.message },
       } as ErrorResponse);
       return;
@@ -625,7 +622,14 @@ export async function updateTopic(req: Request, res: Response): Promise<void> {
     const { id } = paramValidation.data;
     const updates = bodyValidation.data;
 
-    const topic = await Topic.findOne({ _id: id, userId: req.userId });
+    let topic = await Topic.findOne({ _id: id, userId: req.userId });
+    if (topic && updates.urls !== undefined) {
+      // Atomic array updates, so existing entries keep their status and paths (R41)
+      // and a concurrent worker write is never lost. They leave the loaded
+      // document stale, so continue from the stored topic.
+      await applyUrlListUpdate(topic, updates.urls);
+      topic = await Topic.findOne({ _id: id, userId: req.userId });
+    }
     if (!topic) {
       res.status(404).json({
         error: {
@@ -642,15 +646,9 @@ export async function updateTopic(req: Request, res: Response): Promise<void> {
     if (updates.subjectName) topic.subjectName = updates.subjectName.trim();
     if (updates.description !== undefined) topic.description = updates.description.trim();
 
-    if (updates.urls !== undefined) {
-      // Atomic array updates: existing entries keep their status and paths (R41).
-      await applyUrlListUpdate(topic, updates.urls, day.now);
-    }
-
     // Clear mindmap if no materials remain
-    const materials = await Topic.findOne({ _id: id, userId: req.userId }).select("files urls").lean();
-    const hasFiles = (materials?.files.length ?? 0) > 0;
-    const hasHttpUrls = (materials?.urls ?? []).some((u) => u.url.startsWith("http://") || u.url.startsWith("https://"));
+    const hasFiles = topic.files.length > 0;
+    const hasHttpUrls = filterPublishableUrls(topic.urls.map((u) => u.url)).length > 0;
     if (!hasFiles && !hasHttpUrls) {
       topic.mindMap = null;
       topic.mindMapGeneratedAt = null;
@@ -671,9 +669,7 @@ export async function updateTopic(req: Request, res: Response): Promise<void> {
 
     await topic.save();
 
-    const updated = await Topic.findOne({ _id: id, userId: req.userId });
-
-    res.status(200).json({ success: true, topic: updated });
+    res.status(200).json({ success: true, topic });
   } catch (error) {
     log.error({ err: error }, "Error updating topic");
 
@@ -736,7 +732,7 @@ export async function deleteTopicFile(req: Request, res: Response): Promise<void
 
     // Clear mindmap if no materials remain after file deletion
     const hasRemainingFiles = topic.files.length > 0;
-    const hasHttpUrls = topic.urls.some((u) => u.url.startsWith("http://") || u.url.startsWith("https://"));
+    const hasHttpUrls = filterPublishableUrls(topic.urls.map((u) => u.url)).length > 0;
     if (!hasRemainingFiles && !hasHttpUrls) {
       topic.mindMap = null;
       topic.mindMapGeneratedAt = null;

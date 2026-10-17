@@ -1,7 +1,9 @@
 import type { IQuestionBank } from "@models/Topic.js";
 import { QUIZ } from "@config/questionBank.js";
 import { summarizeAttachments, type AttachmentSummary, type TopicAttachments } from "@services/attachments.js";
-import { isDueToday, isReviewedToday, type LearnerDay } from "@services/learnerDay.js";
+import type { Request } from "express";
+import { getLearnerDay, isDueToday, isReviewedToday, type LearnerDay } from "@services/learnerDay.js";
+import { isAIConfigured } from "@middleware/aiConfigCheck.js";
 import { toQuestionBankView, type QuestionBankView } from "@services/questionBankView.js";
 import { estimateRetention, previewIntervals } from "@services/sm2Algorithm.js";
 import type { QuizAvailability, ReasonCode, TopicReviewFields } from "$types/topic.types.js";
@@ -35,6 +37,12 @@ export interface ReviewContext {
 }
 
 export type ReviewState = TopicReviewFields;
+
+/** The review context for a request: the learner's day and the deployment's AI configuration. */
+export function reviewContextFor(req: Request): ReviewContext {
+  const day = getLearnerDay(req);
+  return { day, now: day.now, aiConfigured: isAIConfigured() };
+}
 
 function quiz(reason: ReasonCode | null): QuizAvailability {
   return { available: reason === null, reason };

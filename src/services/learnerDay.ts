@@ -6,9 +6,22 @@ import { DateTime, IANAZone } from "luxon";
  * (`reviser-web/src/service/AxiosInstance.mjs`). Node lowercases incoming header
  * names, so it is always read through its lowercase form.
  */
-export const LOCAL_TIMEZONE_HEADER = "x-local-timezone";
+const LOCAL_TIMEZONE_HEADER = "x-local-timezone";
 
 const FALLBACK_ZONE = "UTC";
+
+/**
+ * Zones already confirmed valid. Luxon's check builds an Intl formatter on
+ * every call; only valid IANA names are cached, so the set stays small.
+ */
+const validZones = new Set<string>();
+
+function isValidZone(zone: string): boolean {
+  if (validZones.has(zone)) return true;
+  if (!IANAZone.isValidZone(zone)) return false;
+  validZones.add(zone);
+  return true;
+}
 
 /**
  * The learner's current calendar day.
@@ -34,7 +47,7 @@ export interface LearnerDay {
 export function learnerDayFromHeader(header: string | string[] | undefined, now: Date = new Date()): LearnerDay {
   const raw = Array.isArray(header) ? header[0] : header;
   const candidate = raw?.trim();
-  const zone = candidate && IANAZone.isValidZone(candidate) ? candidate : FALLBACK_ZONE;
+  const zone = candidate && isValidZone(candidate) ? candidate : FALLBACK_ZONE;
 
   const local = DateTime.fromJSDate(now).setZone(zone);
   const start = local.startOf("day");
@@ -82,6 +95,6 @@ export function changedStudyDate(submitted: string, stored: Date, day: LearnerDa
  * The calendar date (`YYYY-MM-DD`) an instant falls on in the learner's zone.
  * Used to compare a date-only form value against a stored timestamp.
  */
-export function localDateOf(date: Date, day: LearnerDay): string {
+function localDateOf(date: Date, day: LearnerDay): string {
   return DateTime.fromJSDate(date).setZone(day.zone).toISODate()!;
 }

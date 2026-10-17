@@ -121,35 +121,28 @@ export async function failStaleAttachments(now: Date = new Date()): Promise<numb
   const cutoff = new Date(now.getTime() - ATTACHMENT_STALE_MS);
   const cutoffId = Types.ObjectId.createFromTime(Math.floor(cutoff.getTime() / 1000));
   const unsettled = { $in: ["pending", "processing"] };
-  const staleEntry = {
+  /**
+   * Pending or processing past the cutoff, by `statusUpdatedAt`, or by `_id`
+   * creation time for legacy entries without one. `field` prefixes each path
+   * for use inside an array filter.
+   */
+  const stalePredicate = (field: (name: string) => string) => ({
     $or: [
-      { processingStatus: unsettled, statusUpdatedAt: { $lt: cutoff } },
-      { processingStatus: unsettled, statusUpdatedAt: null, _id: { $lt: cutoffId } },
+      { [field("processingStatus")]: unsettled, [field("statusUpdatedAt")]: { $lt: cutoff } },
+      { [field("processingStatus")]: unsettled, [field("statusUpdatedAt")]: null, [field("_id")]: { $lt: cutoffId } },
     ],
-  };
+  });
+  const staleEntry = stalePredicate((name) => name);
 
   const topics = await Topic.find({ $or: [{ files: { $elemMatch: staleEntry } }, { urls: { $elemMatch: staleEntry } }] })
     .select("_id userId")
     .lean();
 
-  const failed = {
-    processingStatus: "failed",
-    errorReason: STALE_ATTACHMENT_REASON,
-    statusUpdatedAt: now,
-  };
-  const elem = (prefix: string) => [
-    { [`${prefix}.processingStatus`]: unsettled, [`${prefix}.statusUpdatedAt`]: { $lt: cutoff } },
-  ];
-  const legacyElem = (prefix: string) => [
-    { [`${prefix}.processingStatus`]: unsettled, [`${prefix}.statusUpdatedAt`]: null, [`${prefix}._id`]: { $lt: cutoffId } },
-  ];
-  const setAll = (array: "files" | "urls", name: string) =>
-    Object.fromEntries(Object.entries(failed).map(([field, value]) => [`${array}.$[${name}].${field}`, value]));
-
+  const failed = { processingStatus: "failed", errorReason: STALE_ATTACHMENT_REASON, statusUpdatedAt: now };
   for (const { _id, userId } of topics) {
     for (const array of ["files", "urls"] as const) {
-      await Topic.updateOne({ _id, userId }, { $set: setAll(array, "stale") }, { arrayFilters: elem("stale") });
-      await Topic.updateOne({ _id, userId }, { $set: setAll(array, "legacy") }, { arrayFilters: legacyElem("legacy") });
+      const $set = Object.fromEntries(Object.entries(failed).map(([field, value]) => [`${array}.$[stale].${field}`, value]));
+      await Topic.updateOne({ _id, userId }, { $set }, { arrayFilters: [stalePredicate((name) => `stale.${name}`)] });
     }
     log.warn({ topicId: _id.toString() }, "Marked stalled attachments as failed");
     await onAttachmentSettled(_id.toString(), userId, now);
@@ -204,7 +197,7 @@ export async function republishStalledBanks(now: Date = new Date()): Promise<{ r
 }
 
 /** One sweep pass. */
-export async function sweepQuestionBanks(now: Date = new Date()): Promise<void> {
+async function sweepQuestionBanks(now: Date = new Date()): Promise<void> {
   const staleTopics = await failStaleAttachments(now);
   const banks = await republishStalledBanks(now);
   if (staleTopics || banks.republished || banks.failed) log.info({ staleTopics, ...banks }, "Question bank sweep finished");
@@ -226,11 +219,6 @@ export function startQuestionBankSweep(intervalMs: number = QUESTION_BANK.SWEEP_
       });
   }, intervalMs);
   sweepTimer.unref();
-}
-
-export function stopQuestionBankSweep(): void {
-  if (sweepTimer) clearInterval(sweepTimer);
-  sweepTimer = null;
 }
 
 /**

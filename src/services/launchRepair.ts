@@ -1,9 +1,9 @@
 import { Types } from "mongoose";
 import { Topic, type IAttachedFile, type IAttachedUrl, type BankState } from "@models/Topic.js";
 import { RevisionRecord } from "@models/RevisionRecord.js";
-import { STALE_ATTACHMENT_REASON, allSettled, fileTypeFor, hasCompletedMaterial, isStale, type AttachmentLike } from "@services/attachments.js";
+import { STALE_ATTACHMENT_REASON, allSettled, hasCompletedMaterial, isStale, type AttachmentLike } from "@services/attachments.js";
 import { extractedKeyForFile, extractedKeyForUrl, parseUploadKey } from "@services/uploadKey.js";
-import { filterPublishableUrls } from "@services/topicMaterials.js";
+import { fileEntry, filterPublishableUrls } from "@services/topicMaterials.js";
 import { logger } from "@config/logger.js";
 
 const log = logger.child({ module: "launchRepair" });
@@ -93,8 +93,8 @@ function isStuck(att: AttachmentLike & { errorReason?: string | null }, now: Dat
 }
 
 /**
- * Plans one topic's attachment and rating repairs. Pure.
- * `contentTypes` holds the content type of every upload that has no entry.
+ * Plans one topic's attachment and rating repairs. Pure. Every upload that
+ * has no entry yet must carry its `contentType`.
  */
 export function planTopicRepair(input: {
   topic: RepairTopic;
@@ -172,21 +172,7 @@ async function applyTopicRepair(plan: TopicRepairPlan, bucket: string, deps: Rep
   for (const entry of plan.newFileEntries) {
     await Topic.updateOne(
       { _id: topicId, userId, "files.s3Path": { $ne: entry.key } },
-      {
-        $push: {
-          files: {
-            fileName: entry.fileName,
-            fileType: fileTypeFor(entry.contentType),
-            s3Path: entry.key,
-            s3Bucket: bucket,
-            size: entry.size ?? null,
-            extractedContentUrl: entry.extractedPath ?? null,
-            processingStatus: entry.status,
-            statusUpdatedAt: now,
-            processedAt: now,
-          },
-        },
-      },
+      { $push: { files: fileEntry({ ...entry, bucket, now }) } },
     );
   }
 

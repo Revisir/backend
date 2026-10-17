@@ -34,11 +34,8 @@ export async function reviewQuestions(questions: IQuestion[], studyMaterials: st
  * Runs the full question generation pipeline: extract → review.
  * The AI chat uses the default count; it throws when either step yields nothing.
  */
-export async function generateQuestions(
-  studyMaterials: string,
-  count: number = QUESTION_BANK.CHAT_EXTRACTION_COUNT
-): Promise<IQuestion[]> {
-  const extracted = await extractQuestions(studyMaterials, count);
+export async function generateQuestions(studyMaterials: string): Promise<IQuestion[]> {
+  const extracted = await extractQuestions(studyMaterials, QUESTION_BANK.CHAT_EXTRACTION_COUNT);
   if (extracted.length === 0) throw new Error("Failed to extract questions from study materials");
 
   const reviewed = await reviewQuestions(extracted, studyMaterials);

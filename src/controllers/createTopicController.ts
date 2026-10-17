@@ -10,8 +10,6 @@ import { logger } from "@config/logger.js";
 
 const log = logger.child({ module: "createTopicController" });
 
-export { filterPublishableUrls } from "@services/topicMaterials.js";
-
 /**
  * POST /api/topics
  * Creates a new topic and generates presigned URLs for file uploads

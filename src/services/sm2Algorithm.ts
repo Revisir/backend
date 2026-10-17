@@ -94,7 +94,7 @@ export function calculateNextReview(input: SM2Input, now: Date = new Date()): SM
 
 /** Retention the SM-2 schedule aims for when a review falls due. */
 const RETENTION_AT_DUE = 0.9;
-/** `S = interval / -ln(0.9)`, written as a factor so the forgetting curve's output stays bit-identical. */
+/** Stability per day of interval: `S = interval / -ln(0.9)`, so retention is 0.9 when a review falls due. */
 const STABILITY_PER_INTERVAL_DAY = -1 / Math.log(RETENTION_AT_DUE);
 const DAY_MS = 86_400_000;
 

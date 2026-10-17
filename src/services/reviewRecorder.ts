@@ -2,7 +2,8 @@ import { Types } from "mongoose";
 import { Topic } from "@models/Topic.js";
 import { RevisionRecord, type RevisionMethod } from "@models/RevisionRecord.js";
 import { calculateNextReview } from "@services/sm2Algorithm.js";
-import type { LearnerDay } from "@services/learnerDay.js";
+import { setTimeout as sleep } from "node:timers/promises";
+import { isReviewedToday, type LearnerDay } from "@services/learnerDay.js";
 import { logger } from "@config/logger.js";
 
 const log = logger.child({ module: "reviewRecorder" });
@@ -10,6 +11,7 @@ const log = logger.child({ module: "reviewRecorder" });
 /** Thrown when the topic already has a review in the learner's current day. */
 export class AlreadyReviewedTodayError extends Error {
   readonly code = "ALREADY_REVIEWED_TODAY";
+  readonly status = 409;
   constructor() {
     super("This topic has already been reviewed today");
     this.name = "AlreadyReviewedTodayError";
@@ -19,6 +21,7 @@ export class AlreadyReviewedTodayError extends Error {
 /** Thrown when the topic does not exist or belongs to another user. */
 export class TopicNotFoundError extends Error {
   readonly code = "TOPIC_NOT_FOUND";
+  readonly status = 404;
   constructor() {
     super("Topic not found or access denied");
     this.name = "TopicNotFoundError";
@@ -50,7 +53,7 @@ export interface RevisionResult {
 }
 
 /** The rating SM-2 sees: the mean of the learner's and the AI's when the AI scored, else the learner's. */
-export function finalQualityOf(userQuality: number, llmQuality?: number | null): number {
+function finalQualityOf(userQuality: number, llmQuality?: number | null): number {
   return llmQuality != null ? (userQuality + llmQuality) / 2 : userQuality;
 }
 
@@ -79,7 +82,7 @@ export async function recordRevision(input: RecordRevisionInput): Promise<Revisi
     .select("eFactor interval repetitionNumber revisionDate lastRevised lastQuality lastReviewSessionId")
     .lean();
   if (!topic) throw new TopicNotFoundError();
-  if (topic.lastRevised && topic.lastRevised.getTime() >= day.start.getTime()) return sameSessionReview(userId, topicId, sessionId);
+  if (isReviewedToday(topic, day)) return sameSessionReview(userId, topicId, sessionId);
 
   const finalQuality = finalQualityOf(userQuality, llmQuality);
   const schedule = calculateNextReview(
@@ -181,6 +184,6 @@ async function sameSessionReview(userId: string, topicId: string | Types.ObjectI
     }
     // The winner claimed the day but has not written its record (or failed and is restoring).
     if (Date.now() >= deadline) throw new AlreadyReviewedTodayError();
-    await new Promise((resolve) => setTimeout(resolve, SESSION_REVIEW_POLL_MS));
+    await sleep(SESSION_REVIEW_POLL_MS);
   }
 }

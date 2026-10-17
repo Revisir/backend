@@ -103,7 +103,6 @@ const RevisionRecordSchema = new Schema<IRevisionRecord>({
  * Optimizes queries for revision history by user, topic and date
  */
 RevisionRecordSchema.index({ userId: 1, topicId: 1, revisionDate: -1 });
-RevisionRecordSchema.index({ userId: 1, sessionId: 1 }, { partialFilterExpression: { sessionId: { $type: "objectId" } } });
 
 /**
  * RevisionRecord model

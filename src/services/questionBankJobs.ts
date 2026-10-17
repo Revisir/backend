@@ -25,16 +25,24 @@ const log = logger.child({ module: "questionBankJobs" });
 export async function requestBankBuild(params: { topicId: string; userId: string; reason: QuestionBankBuildReason; now?: Date }): Promise<QuestionBankView | null> {
   const { topicId, userId, reason, now = new Date() } = params;
   // The sweep counts its republishes toward the attempt cap; any other trigger starts the count over.
-  const attempts = reason === "sweep" ? { $inc: { "questionBank.attempts": 1 } } : { $set: { "questionBank.attempts": 0 } };
+  const sweep = reason === "sweep";
+  const countAttempt = sweep ? { $inc: { "questionBank.attempts": 1 } } : {};
+  const resetAttempts = sweep ? {} : { "questionBank.attempts": 0 };
   const options = { new: true, projection: { questionBank: 1 } } as const;
 
   const queued = await Topic.findOneAndUpdate(
     { _id: topicId, userId, "questionBank.state": { $ne: "building" } },
-    { ...attempts, $set: { ...("$set" in attempts ? attempts.$set : {}), "questionBank.state": "queued" }, $max: { "questionBank.requestedAt": now } },
+    { ...countAttempt, $set: { ...resetAttempts, "questionBank.state": "queued" }, $max: { "questionBank.requestedAt": now } },
     options,
   ).lean();
   // A build is running: leave it building and raise requestedAt so it publishes one follow-up.
-  const topic = queued ?? (await Topic.findOneAndUpdate({ _id: topicId, userId }, { ...attempts, $max: { "questionBank.requestedAt": now } }, options).lean());
+  const topic =
+    queued ??
+    (await Topic.findOneAndUpdate(
+      { _id: topicId, userId },
+      { ...countAttempt, ...(sweep ? {} : { $set: resetAttempts }), $max: { "questionBank.requestedAt": now } },
+      options,
+    ).lean());
   if (!topic) return null;
 
   await publishBankMessage({ topicId, userId, requestedAt: now.toISOString(), reason });

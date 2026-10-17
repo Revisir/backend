@@ -1,4 +1,5 @@
 import { Schema, model, Document, Types } from "mongoose";
+import { QUESTION_TYPES, type QuestionType } from "@models/Topic.js";
 
 /**
  * One drawn question, snapshotted from the topic's bank when the quiz starts
@@ -10,7 +11,7 @@ export interface IQuizQuestion {
   id: string;
   /** The bank question's retirement key (`normalizeText(prompt)`). */
   key: string;
-  type: "mcq" | "fill_blank";
+  type: QuestionType;
   prompt: string;
   /** Multiple choice: the options in the order this quiz shows them (shuffled at start). */
   options?: string[];
@@ -68,7 +69,7 @@ const QuizQuestionSchema = new Schema<IQuizQuestion>(
   {
     id: { type: String, required: true },
     key: { type: String, required: true },
-    type: { type: String, enum: ["mcq", "fill_blank"], required: true },
+    type: { type: String, enum: QUESTION_TYPES, required: true },
     prompt: { type: String, required: true },
     options: { type: [String], default: undefined },
     answer: { type: String, required: true },
@@ -114,8 +115,6 @@ const QuizSessionSchema = new Schema<IQuizSession>({
   expiresAt: { type: Date, required: true },
 });
 
-/** Every lookup is scoped by user. */
-QuizSessionSchema.index({ userId: 1, _id: 1 });
 /** Abandoned sessions expire; completed ones are kept a while for repeat completions. */
 QuizSessionSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 

@@ -34,18 +34,42 @@ export interface DeclaredFile {
   size: number;
 }
 
-/** A pending file entry for an upload whose URL is being issued. */
-export function pendingFileEntry(userId: string, topicId: string, file: DeclaredFile, now: Date = new Date()) {
+/** A file entry for an uploaded object, keyed by its storage path. */
+export function fileEntry(params: {
+  key: string;
+  bucket: string;
+  fileName: string;
+  contentType: string;
+  size?: number | null;
+  status: "pending" | "completed";
+  extractedPath?: string;
+  now: Date;
+}) {
+  const { key, bucket, fileName, contentType, size, status, extractedPath, now } = params;
   return {
-    fileName: file.fileName,
-    fileType: fileTypeFor(file.contentType),
-    s3Path: buildUploadKey(userId, topicId, file.fileName),
-    s3Bucket: S3_BUCKET_NAME,
-    size: file.size,
-    processingStatus: "pending" as const,
+    fileName,
+    fileType: fileTypeFor(contentType),
+    s3Path: key,
+    s3Bucket: bucket,
+    size: size ?? null,
+    ...(extractedPath ? { extractedContentUrl: extractedPath } : {}),
+    processingStatus: status,
     statusUpdatedAt: now,
     processedAt: now,
   };
+}
+
+/** A pending file entry for an upload whose URL is being issued. */
+export function pendingFileEntry(userId: string, topicId: string, file: DeclaredFile, now: Date = new Date()) {
+  return fileEntry({
+    key: buildUploadKey(userId, topicId, file.fileName),
+    bucket: S3_BUCKET_NAME,
+    fileName: file.fileName,
+    contentType: file.contentType,
+    size: file.size,
+    status: "pending",
+    now,
+  });
 }
 
 /**
@@ -54,8 +78,9 @@ export function pendingFileEntry(userId: string, topicId: string, file: Declared
  */
 export function newUrlEntries(urls: string[], now: Date = new Date()): { entries: Partial<IAttachedUrl>[]; publishable: string[] } {
   const publishable = filterPublishableUrls(urls);
+  const extractable = new Set(publishable);
   const entries = urls.map((url) =>
-    publishable.includes(url)
+    extractable.has(url)
       ? { url, processingStatus: "pending" as const, statusUpdatedAt: now }
       : { url, processingStatus: "failed" as const, statusUpdatedAt: now, errorReason: URL_NOT_EXTRACTABLE_REASON },
   );
@@ -143,24 +168,15 @@ export async function ensureFileEntry(params: {
 }): Promise<boolean> {
   const { topicId, userId, key, bucket, fileName, contentType, size, now = new Date() } = params;
   if (!Types.ObjectId.isValid(topicId)) return false;
-  if (!(await Topic.exists({ _id: topicId, userId }))) return false;
+
+  // One read covers both questions: does the topic exist, and does it have this entry?
+  const topic = await Topic.findOne({ _id: topicId, userId }, { files: { $elemMatch: { s3Path: key } } }).lean();
+  if (!topic) return false;
+  if (topic.files?.length) return true;
 
   await Topic.updateOne(
     { _id: topicId, userId, "files.s3Path": { $ne: key } },
-    {
-      $push: {
-        files: {
-          fileName,
-          fileType: fileTypeFor(contentType),
-          s3Path: key,
-          s3Bucket: bucket,
-          size,
-          processingStatus: "pending",
-          statusUpdatedAt: now,
-          processedAt: now,
-        },
-      },
-    },
+    { $push: { files: fileEntry({ key, bucket, fileName, contentType, size, status: "pending", now }) } },
   );
   return true;
 }
@@ -201,16 +217,14 @@ export async function applyUrlListUpdate(
   now: Date = new Date(),
 ): Promise<{ added: string[]; removed: string[] }> {
   const topicId = topic._id.toString();
-  const wanted = [...new Set(submitted)];
+  const wanted = new Set(submitted);
   const existing = new Set(topic.urls.map((u) => u.url));
-  const removedEntries = topic.urls.filter((u) => !wanted.includes(u.url));
-  const added = wanted.filter((url) => !existing.has(url));
+  const removedEntries = topic.urls.filter((u) => !wanted.has(u.url));
+  const added = [...wanted].filter((url) => !existing.has(url));
 
   if (removedEntries.length) {
     await Topic.updateOne({ _id: topic._id, userId: topic.userId }, { $pull: { urls: { url: { $in: removedEntries.map((u) => u.url) } } } });
-    for (const removed of removedEntries) {
-      if (removed.extractedContentPath) await deleteByPath(removed.extractedContentPath);
-    }
+    await Promise.all(removedEntries.flatMap((removed) => (removed.extractedContentPath ? [deleteByPath(removed.extractedContentPath)] : [])));
   }
 
   if (added.length) {

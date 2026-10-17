@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import { isValidObjectId } from "mongoose";
 import { logger } from "@config/logger.js";
 import { PROMPTS } from "@config/prompts.js";
@@ -362,8 +363,4 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

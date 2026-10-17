@@ -1,6 +1,7 @@
 import { Schema, model, Document, Types } from "mongoose";
 
-export type ProcessingStatus = "pending" | "processing" | "completed" | "failed";
+export const PROCESSING_STATUSES = ["pending", "processing", "completed", "failed"] as const;
+export type ProcessingStatus = (typeof PROCESSING_STATUSES)[number];
 
 /**
  * Interface for AttachedFile subdocument
@@ -39,6 +40,9 @@ export interface IAttachedUrl {
 export const BANK_STATES = ["none", "queued", "building", "ready", "empty", "failed"] as const;
 export type BankState = (typeof BANK_STATES)[number];
 
+export const QUESTION_TYPES = ["mcq", "fill_blank"] as const;
+export type QuestionType = (typeof QUESTION_TYPES)[number];
+
 /**
  * One checked question in a topic's bank. Answers never leave the server
  * except one at a time, after the learner has answered that question.
@@ -48,7 +52,7 @@ export interface IBankQuestion {
   id: string;
   /** `normalizeText(prompt)`: the retirement and de-duplication key. */
   key: string;
-  type: "mcq" | "fill_blank";
+  type: QuestionType;
   /** A fill-in-the-blank prompt contains exactly one `____`. */
   prompt: string;
   /** Multiple choice: four unique options, one of which equals `answer`. */
@@ -161,7 +165,7 @@ const AttachedFileSchema = new Schema<IAttachedFile>({
   },
   processingStatus: {
     type: String,
-    enum: ["pending", "processing", "completed", "failed"],
+    enum: PROCESSING_STATUSES,
     default: "pending",
   },
   // No default: a hydrated legacy entry must not look freshly updated.
@@ -195,7 +199,7 @@ const AttachedUrlSchema = new Schema<IAttachedUrl>({
   },
   processingStatus: {
     type: String,
-    enum: ["pending", "processing", "completed", "failed"],
+    enum: PROCESSING_STATUSES,
     default: "pending",
   },
   // No default: a hydrated legacy entry must not look freshly updated.
@@ -215,7 +219,7 @@ const BankQuestionSchema = new Schema<IBankQuestion>(
   {
     id: { type: String, required: true },
     key: { type: String, required: true },
-    type: { type: String, enum: ["mcq", "fill_blank"], required: true },
+    type: { type: String, enum: QUESTION_TYPES, required: true },
     prompt: { type: String, required: true },
     options: { type: [String], default: undefined },
     answer: { type: String, required: true },
