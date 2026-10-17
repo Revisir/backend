@@ -43,6 +43,8 @@ export interface ITopic extends Document {
   eFactor: number;
   repetitionNumber: number;
   interval: number;
+  /** Final rating (0–5) of the latest review; null before the first. Older AI reviews may hold halves. */
+  lastQuality: number | null;
   urls: Types.DocumentArray<IAttachedUrl>;
   files: Types.DocumentArray<IAttachedFile>;
   mindMap: string | null;
@@ -177,6 +179,12 @@ const TopicSchema = new Schema<ITopic>(
       type: Number,
       default: 1,
       min: 1,
+    },
+    lastQuality: {
+      type: Number,
+      default: null,
+      min: 0,
+      max: 5,
     },
     urls: {
       type: [AttachedUrlSchema],

@@ -4,15 +4,7 @@ import { logger } from "@config/logger.js";
 
 const log = logger.child({ module: "auth" });
 
-// Extend Express Request type to include user information
-declare global {
-  namespace Express {
-    interface Request {
-      userId?: string;
-      userEmail?: string;
-    }
-  }
-}
+// `req.userId` / `req.userEmail` are declared in src/types/express.d.ts
 if (!process.env.AUTH_AUTHORITY) {
   throw new Error("Need AUTH_AUTHORITY");
 }

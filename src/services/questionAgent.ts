@@ -1,4 +1,4 @@
-import { getLLMClient } from "./llmClient.js";
+import { getLLMClient } from "@services/llmClient.js";
 import { PROMPTS } from "@config/prompts.js";
 import { IQuestion } from "@models/ChatSession.js";
 

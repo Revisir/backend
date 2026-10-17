@@ -41,9 +41,10 @@ export interface SM2Result {
  * 4. Reset logic: If quality < 3, reset repetition to 0 and interval to 1
  * 
  * @param input - Current topic state and quality rating
+ * @param now - The review instant the next revision date counts from
  * @returns Updated topic state with next revision date
  */
-export function calculateNextReview(input: SM2Input): SM2Result {
+export function calculateNextReview(input: SM2Input, now: Date = new Date()): SM2Result {
   const { eFactor, repetitionNumber, interval, quality } = input;
 
   // Calculate new E-Factor using SM-2 formula
@@ -80,7 +81,7 @@ export function calculateNextReview(input: SM2Input): SM2Result {
   }
 
   // Calculate next revision date
-  const nextRevisionDate = new Date();
+  const nextRevisionDate = new Date(now);
   nextRevisionDate.setDate(nextRevisionDate.getDate() + newInterval);
 
   return {

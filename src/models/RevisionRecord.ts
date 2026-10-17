@@ -1,5 +1,8 @@
 import { Schema, model, Document, Types } from 'mongoose';
 
+export const REVISION_METHODS = ["self", "ai_quiz", "normal_quiz"] as const;
+export type RevisionMethod = (typeof REVISION_METHODS)[number];
+
 /**
  * Interface for RevisionRecord document
  */
@@ -14,6 +17,13 @@ export interface IRevisionRecord extends Document {
   newEFactor: number;
   newInterval: number;
   nextRevisionDate: Date;
+  /** How the review was taken. Records written before this field existed read as `self`. */
+  method: RevisionMethod;
+  /** Normal quiz only: questions that counted toward the score, and how many were right. */
+  quizScored?: number | null;
+  quizCorrect?: number | null;
+  /** The chat or quiz session that produced this review, for idempotent completion. */
+  sessionId?: Types.ObjectId | null;
   createdAt: Date;
 }
 
@@ -35,23 +45,23 @@ const RevisionRecordSchema = new Schema<IRevisionRecord>({
     type: Date, 
     required: true 
   },
-  userQuality: { 
-    type: Number, 
-    required: true, 
-    min: 1, 
-    max: 5 
+  userQuality: {
+    type: Number,
+    required: true,
+    min: 0,
+    max: 5
   },
-  llmQuality: { 
-    type: Number, 
-    required: true, 
-    min: 1, 
-    max: 5 
+  llmQuality: {
+    type: Number,
+    required: true,
+    min: 0,
+    max: 5
   },
-  finalQuality: { 
-    type: Number, 
-    required: true, 
-    min: 1, 
-    max: 5 
+  finalQuality: {
+    type: Number,
+    required: true,
+    min: 0,
+    max: 5
   },
   newEFactor: { 
     type: Number, 
@@ -64,6 +74,25 @@ const RevisionRecordSchema = new Schema<IRevisionRecord>({
   nextRevisionDate: { 
     type: Date, 
     required: true 
+  },
+  method: {
+    type: String,
+    enum: REVISION_METHODS,
+    default: "self"
+  },
+  quizScored: {
+    type: Number,
+    min: 0,
+    default: null
+  },
+  quizCorrect: {
+    type: Number,
+    min: 0,
+    default: null
+  },
+  sessionId: {
+    type: Schema.Types.ObjectId,
+    default: null
   }
 }, {
   timestamps: { createdAt: true, updatedAt: false }
@@ -74,6 +103,7 @@ const RevisionRecordSchema = new Schema<IRevisionRecord>({
  * Optimizes queries for revision history by user, topic and date
  */
 RevisionRecordSchema.index({ userId: 1, topicId: 1, revisionDate: -1 });
+RevisionRecordSchema.index({ userId: 1, sessionId: 1 }, { partialFilterExpression: { sessionId: { $type: "objectId" } } });
 
 /**
  * RevisionRecord model

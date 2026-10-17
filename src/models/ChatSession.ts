@@ -18,6 +18,14 @@ export interface IMessage {
 }
 
 /**
+ * The recorded outcome of a completed chat session, returned again on a repeat completion.
+ */
+export interface IChatSessionResult {
+  nextRevisionDate: Date;
+  finalQuality: number;
+}
+
+/**
  * Interface for ChatSession document
  */
 export interface IChatSession extends Document {
@@ -30,6 +38,7 @@ export interface IChatSession extends Document {
   questions: IQuestion[];
   currentQuestionIndex: number;
   active: boolean;
+  result: IChatSessionResult | null;
 }
 
 /**
@@ -87,6 +96,13 @@ const ChatSessionSchema = new Schema<IChatSession>({
   active: { 
     type: Boolean, 
     default: true 
+  },
+  result: {
+    type: new Schema<IChatSessionResult>({
+      nextRevisionDate: { type: Date, required: true },
+      finalQuality: { type: Number, required: true }
+    }, { _id: false }),
+    default: null
   }
 });
 

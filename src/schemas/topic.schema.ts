@@ -33,6 +33,12 @@ export const topicFileParamSchema = z.object({
   fileId: z.string().regex(mongoIdRegex, "Invalid file ID format"),
 });
 
+/** Done on the topic page: the learner's own 0–5 rating. */
+export const markRevisedSchema = z.object({
+  userQuality: z.number("userQuality must be a number between 0 and 5").min(0, "userQuality must be between 0 and 5").max(5, "userQuality must be between 0 and 5"),
+});
+
 export type CreateTopicInput = z.infer<typeof createTopicSchema>;
 export type GetTopicsQuery = z.infer<typeof getTopicsQuerySchema>;
 export type TopicIdParam = z.infer<typeof topicIdParamSchema>;
+export type MarkRevisedInput = z.infer<typeof markRevisedSchema>;
