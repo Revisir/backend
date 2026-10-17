@@ -4,6 +4,7 @@ import { Publishers } from "@services/rabbitmq/index.js";
 import { deleteByPath } from "@services/s3Storage.js";
 import { buildUploadKey } from "@services/uploadKey.js";
 import { fileTypeFor } from "@services/attachments.js";
+import { afterMaterialRemoved, bestEffort, onAttachmentSettled } from "@services/questionBankJobs.js";
 import { S3_BUCKET_NAME } from "@config/s3.js";
 import { logger } from "@config/logger.js";
 
@@ -191,10 +192,11 @@ export async function setFileStatus(
  * they were, new URLs are appended (pending, or failed when they cannot be
  * extracted), and removed URLs lose their entry and their extracted file.
  * Uses atomic array updates so a concurrent worker status write is never lost.
- * Publishes only the new extractable URLs.
+ * Publishes only the new extractable URLs. Removing completed material
+ * rebuilds the question bank from what remains (or clears it).
  */
 export async function applyUrlListUpdate(
-  topic: { _id: Types.ObjectId; userId: string; urls: ReadonlyArray<{ url: string; extractedContentPath?: string | null }> },
+  topic: { _id: Types.ObjectId; userId: string; urls: ReadonlyArray<Pick<IAttachedUrl, "url" | "extractedContentPath" | "processingStatus">> },
   submitted: string[],
   now: Date = new Date(),
 ): Promise<{ added: string[]; removed: string[] }> {
@@ -217,5 +219,27 @@ export async function applyUrlListUpdate(
     await queueUrlsOrMarkFailed(topicId, topic.userId, publishable, now);
   }
 
+  await afterAttachmentRemoved(topicId, topic.userId, removedEntries, now);
+
   return { added, removed: removedEntries.map((u) => u.url) };
+}
+
+/**
+ * Keeps the question bank in step with removed attachments: removing completed
+ * material rebuilds the bank from what remains (or clears it when nothing
+ * does); removing an unsettled or failed one may leave every remaining
+ * attachment settled, which is when a first build is due.
+ */
+export async function afterAttachmentRemoved(
+  topicId: string,
+  userId: string,
+  removed: ReadonlyArray<{ processingStatus?: string | null }>,
+  now: Date = new Date(),
+): Promise<void> {
+  if (!removed.length) return;
+  if (removed.some((att) => att.processingStatus === "completed")) {
+    await bestEffort("material_removed", topicId, () => afterMaterialRemoved(topicId, userId, now));
+  } else {
+    await bestEffort("attachment_settled", topicId, () => onAttachmentSettled(topicId, userId, now));
+  }
 }

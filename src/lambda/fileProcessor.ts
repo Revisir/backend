@@ -6,7 +6,9 @@ import mongoose from "mongoose";
 import { extractContent } from "@services/fileExtractor.js";
 import { fileTypeFor } from "@services/attachments.js";
 import { ensureFileEntry, setFileStatus } from "@services/topicMaterials.js";
-import { parseUploadKey } from "@services/uploadKey.js";
+import { bestEffort, onAttachmentSettled } from "@services/questionBankJobs.js";
+import { startQuestionBankConsumer } from "@/lambda/questionBankProcessor.js";
+import { parseUploadKey, extractedKeyForFile } from "@services/uploadKey.js";
 import { logger } from "@config/logger.js";
 import { s3Client } from "@/config/s3.js";
 import { ALLOWED_CONTENT_TYPES, MAX_FILE_SIZE } from "@/config/fileConstants.js";
@@ -107,7 +109,7 @@ async function processFile(bucket: string, key: string): Promise<void> {
     throw new Error(`Extraction failed for key: ${key}: ${errorMsg}`);
   }
 
-  const extractedPath = `${userId}/${topicId}/extracted/${fileName}.md`;
+  const extractedPath = extractedKeyForFile(userId, topicId, fileName);
 
   await s3Client.send(
     new PutObjectCommand({
@@ -146,6 +148,7 @@ export async function handleFileMessage(msg: ConsumeMessage): Promise<MessageOut
 
   try {
     await processFile(bucket, key);
+    await settle(key);
     return "ack";
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
@@ -171,8 +174,16 @@ export async function handleFileMessage(msg: ConsumeMessage): Promise<MessageOut
       log.error({ err: updateErr, bucket, key }, "Failed to update file status on permanent error");
     }
 
+    await settle(key);
     return "nack_reject";
   }
+}
+
+/** Builds the topic's question bank once every attachment has settled. */
+async function settle(key: string): Promise<void> {
+  const parsedKey = parseUploadKey(key);
+  if (!parsedKey) return;
+  await bestEffort("attachment_settled", parsedKey.topicId, () => onAttachmentSettled(parsedKey.topicId, parsedKey.userId));
 }
 
 /**
@@ -197,6 +208,10 @@ export async function startFileConsumer(): Promise<void> {
   });
 
   log.info("File processor consumer started");
+
+  // Question banks are built in this process too (KTD4): a second consumer
+  // with its own prefetch of one, plus the stalled-build sweep.
+  await startQuestionBankConsumer(connectionManager);
 }
 
 /**

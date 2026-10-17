@@ -369,6 +369,8 @@ TopicSchema.index({ userId: 1, revisionDate: 1 }); // for user-specific due topi
 TopicSchema.index({ userId: 1, subjectName: 1 }); // for user-specific subject filtering
 TopicSchema.index({ userId: 1, createdAt: -1 }); // for user-specific recent topics
 TopicSchema.index({ "questionBank.state": 1 }); // for the stalled-bank sweep
+TopicSchema.index({ "files.processingStatus": 1 }); // for the stale-attachment sweep
+TopicSchema.index({ "urls.processingStatus": 1 });
 
 /**
  * Truncates an error reason string to at most 500 characters.

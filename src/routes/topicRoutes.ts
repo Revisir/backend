@@ -3,6 +3,7 @@ import { getTopics, getTopicById, getDueTopics, getTopicHistory, getForgettingCu
 // import { upload } from "@middleware/upload";
 import { createTopic } from "@controllers/createTopicController.js";
 import { requireAIConfig } from "@middleware/aiConfigCheck.js";
+import { regenerateQuestions } from "@controllers/questionBankController.js";
 const router = Router();
 
 /**
@@ -110,6 +111,23 @@ router.post("/:id/mindmap", requireAIConfig, generateTopicMindMap);
  * - 500: Server error
  */
 router.get("/:id/mindmap", requireAIConfig, getTopicMindMap);
+
+/**
+ * POST /api/topics/:id/questions/regenerate
+ * Queue a rebuild that replaces the topic's question bank. Flagged questions
+ * stay retired, and the current questions stay usable until the new bank lands.
+ *
+ * Path parameters:
+ * - id: string (MongoDB ObjectId)
+ *
+ * Response:
+ * - 202: { questionBank: { state, usableCount, rebuilding } }
+ * - 400: Invalid topic ID format
+ * - 404: TOPIC_NOT_FOUND
+ * - 503: AI_NOT_CONFIGURED
+ * - 500: Server error
+ */
+router.post("/:id/questions/regenerate", requireAIConfig, regenerateQuestions);
 
 /**
  * POST /api/topics/:id/revised

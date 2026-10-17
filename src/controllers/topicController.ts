@@ -11,7 +11,7 @@ import { isAIConfigured } from "@middleware/aiConfigCheck.js";
 import { GetTopicsResponse } from "$types/topic.types.js";
 import { ErrorResponse } from "$types/common.types.js";
 import { getTopicsQuerySchema, topicIdParamSchema, topicFileParamSchema, markRevisedSchema, updateTopicSchema } from "@/schemas/index.js";
-import { applyUrlListUpdate, upsertPendingFileEntries } from "@services/topicMaterials.js";
+import { applyUrlListUpdate, upsertPendingFileEntries, afterAttachmentRemoved } from "@services/topicMaterials.js";
 import { z } from "zod";
 import { logger } from "@config/logger.js";
 
@@ -731,6 +731,7 @@ export async function deleteTopicFile(req: Request, res: Response): Promise<void
     await deleteFile(req.userId!, id, file.fileName);
     if (file.extractedContentUrl) await deleteByPath(file.extractedContentUrl);
 
+    const removed = { processingStatus: file.processingStatus };
     file.deleteOne();
 
     // Clear mindmap if no materials remain after file deletion
@@ -742,6 +743,9 @@ export async function deleteTopicFile(req: Request, res: Response): Promise<void
     }
 
     await topic.save();
+
+    // Rebuild the question bank from what remains, or clear it (R17).
+    await afterAttachmentRemoved(id, req.userId!, [removed]);
 
     res.status(200).json({ success: true });
   } catch (error) {

@@ -18,6 +18,9 @@ export interface TopicAttachments {
   urls?: ReadonlyArray<AttachmentLike & Pick<Partial<IAttachedUrl>, "extractedContentPath" | "url">> | null;
 }
 
+/** errorReason the sweep writes on an attachment that stalled past the staleness window. */
+export const STALE_ATTACHMENT_REASON = "Processing timed out";
+
 /** File type stored on a file entry, from the object's content type. */
 export function fileTypeFor(contentType: string): "image" | "pdf" | "text" {
   if (contentType.startsWith("image/")) return "image";
