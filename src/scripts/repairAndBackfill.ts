@@ -9,8 +9,10 @@
  * plans nothing. Never deletes objects or records. See
  * `src/services/launchRepair.ts` for exactly what it changes.
  *
- * Reads MONGODB_URI, the S3/SeaweedFS variables (BUCKET_TYPE, S3_*), and for a
- * real run RABBITMQ_URL.
+ * The runtime images ship only `dist/`, so run it from a source checkout with
+ * the target environment's variables: MONGODB_URI, the S3/SeaweedFS variables
+ * (BUCKET_TYPE, S3_*), and for a real run RABBITMQ_URL. The file-processor
+ * must be running to consume the republished extractions and bank builds.
  */
 import "dotenv/config";
 

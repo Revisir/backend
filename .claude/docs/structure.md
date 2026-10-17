@@ -13,23 +13,26 @@ backend/
 │   │   ├── s3.ts                 s3Client / useSeaweedFS / S3_BUCKET_NAME
 │   │   ├── rabbitmq.ts           RABBITMQ_CONFIG: exchange, queue, DLQ, routing-key names + limits
 │   │   ├── prompts.ts            every LLM prompt in the codebase
+│   │   ├── questionBank.ts       bank, quiz and staleness tunables
 │   │   ├── fileConstants.ts      ALLOWED_CONTENT_TYPES, MAX_FILE_SIZE, per-upload/topic caps
 │   │   └── README.md             S3/SeaweedFS setup notes
 │   ├── controllers/              HTTP handlers only
 │   ├── lambda/
 │   │   ├── fileProcessor.ts      file-processor process (consumer + legacy Lambda handler)
+│   │   ├── questionBankProcessor.ts  bank consumer, claim protocol and sweep (run by the file-processor)
 │   │   └── urlProcessor.ts       url-processor process (consumer + legacy Lambda handler)
 │   ├── middleware/
-│   │   ├── auth.ts               authenticateToken + optionalAuth, augments Express.Request
+│   │   ├── auth.ts               authenticateToken + optionalAuth
 │   │   ├── aiConfigCheck.ts      requireAIConfig → 503 AI_NOT_CONFIGURED
 │   │   └── upload.ts             multer memory storage — currently unused, see known-gaps
-│   ├── models/                   Topic, ChatSession, RevisionRecord
+│   ├── models/                   Topic, ChatSession, RevisionRecord, QuizSession
 │   ├── routes/                   Express routers; JSDoc above each route is the API contract
 │   ├── schemas/                  Zod schemas, barrel-exported from index.ts
-│   ├── scripts/seedData.ts       dev seeding
+│   ├── scripts/                  one-off CLIs: seedData.ts (dev seeding), repairAndBackfill.ts (launch repair)
 │   ├── services/                 all business logic
 │   │   └── rabbitmq/             ConnectionManager, QueuePublisher, QueueConsumer, Publishers
-│   └── types/                    shared response/DTO interfaces
+│   ├── test/                     test helpers (mongo.ts, setupEnv.cjs) — excluded from the build
+│   └── types/                    shared response/DTO interfaces, plus express.d.ts (req.userId)
 ├── .claude/docs/                 this documentation
 ├── apidog/                       API request collections (.http / yaml) per feature area
 ├── localDataScripts/             one-off dev scripts (createTopics.ts)
@@ -87,9 +90,9 @@ via `moduleNameMapper`), and existing tests do exactly that.
 call services, shape the response, map errors to status codes. Never put reusable
 logic here.
 
-The one deliberate exception: `recordRevision` lives in `topicController.ts` and is
-imported by `chatController.ts`. It is shared SM-2 + persistence logic that should
-arguably be a service — if you extend it, consider moving it to `src/services/`.
+Shared review-writing logic lives in `src/services/reviewRecorder.ts`
+(`recordRevision`, used by `/revised`, chat completion and quiz completion), not
+in a controller.
 
 **Services** (`src/services/`) — all business logic, no `Request`/`Response`. Services
 may read models and call other services.
@@ -99,9 +102,9 @@ exported. Model files may also export pure domain helpers that belong with the s
 (`truncateErrorReason`, `isValidStatusTransition` in `Topic.ts`).
 
 **Schemas** (`src/schemas/`) — Zod only. Export the schema *and* its `z.infer` type.
-Re-export from `index.ts`. Note that `topicController.ts` currently declares four
-schemas inline instead (`markRevisedSchema`, `updateTopicSchema`, `fileInfoSchema`,
-`uploadFilesSchema`) — that is drift, not the pattern to copy.
+Re-export from `index.ts`. Note that `topicController.ts` still declares two
+schemas inline (`fileInfoSchema`, `uploadFilesSchema`) — that is drift, not the
+pattern to copy.
 
 **Routes** (`src/routes/`) — wiring plus the JSDoc contract block. Route-specific
 middleware is applied here (`router.use(requireAIConfig)` in `chatRoutes.ts`,
@@ -153,8 +156,20 @@ For several URLs at once, `updateMany` with `arrayFilters` (see `handleUrlMessag
 **Pure functions pulled out for testing.** Several modules export a small pure helper
 purely so it can be property-tested in isolation: `computeBackoffDelay`,
 `isTransientError`, `shouldSkipExtractedKey`, `filterPublishableUrls`,
-`isValidStatusTransition`, `truncateErrorReason`. Follow that pattern when you add
-logic worth testing exhaustively.
+`isValidStatusTransition`, `truncateErrorReason`, `normalizeText`,
+`ratingForScore`, `validateFormattedItems`, `computeReviewState`,
+`planTopicRepair`. Follow that pattern when you add logic worth testing
+exhaustively.
+
+**"Today" is the learner's day.** Never read the clock's date directly for a
+product rule: take `getLearnerDay(req)` (`src/services/learnerDay.ts`) and use
+`isReviewedToday` / `isDueToday`.
+
+**Attachment status writes** go through `src/services/topicMaterials.ts`
+(`setFileStatus`, `ensureFileEntry`, `applyUrlListUpdate`, …), which also stamp
+`statusUpdatedAt`; status reads go through `src/services/attachments.ts`.
+Storage key shapes (`buildUploadKey`, `extractedKeyForFile`,
+`extractedKeyForUrl`) live in `src/services/uploadKey.ts`.
 
 ## File naming
 

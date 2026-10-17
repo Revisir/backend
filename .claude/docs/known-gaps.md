@@ -7,6 +7,57 @@ couple are real.
 The working tree is mid-migration from **direct/Lambda processing to RabbitMQ
 queues**. Most of what follows is fallout from that.
 
+## Statistics aggregates are not scoped by `userId`
+
+**A real data leak, deliberately left unfixed.** In `statisticsController.ts`,
+the `perSubject` aggregate (`Topic.aggregate` grouped by subject and due state)
+and the `revisionPerDay` aggregate (`RevisionRecord.aggregate` grouped by day)
+have no `$match` on `userId`, so `GET /api/statistics` returns every learner's
+per-subject counts and daily revision counts, not just the caller's. The other
+statistics queries are scoped. This breaks the `CLAUDE.md` scoping rule. It was
+found during the due-queue work and left alone on the owner's direction, to be
+fixed separately; the fix is a `{ $match: { userId } }` stage at the head of
+both pipelines.
+
+## Date-only values stored as UTC midnight are compared as instants
+
+`dateStudied` arrives as `YYYY-MM-DD` and is stored as UTC midnight of that day.
+`revisionDate` is also UTC midnight after a changed study date (KTD20 in
+`updateTopic`) and after `POST /:id/reset` (which copies `dateStudied`). A new
+topic's first `revisionDate` and every reviewed topic's are full timestamps
+(the creation or review instant plus the interval).
+
+The learner-day rules (`isDueToday`, `isReviewedToday` in
+`src/services/learnerDay.ts`) compare those stored instants with the learner's
+day bounds and do not treat a UTC-midnight value as a calendar date. So for a
+learner west of UTC, a topic whose `revisionDate` is UTC midnight of day D
+becomes due on the evening of D−1 local time (e.g. 19:00 or 20:00 in New
+York), and on D the frontend shows it as "Overdue 1 day". East of UTC it falls
+due in the early hours of D, which is the intended day. Left as is in this
+release (no behavior change beyond the plan); a fix would read UTC-midnight
+date-only values as calendar dates in the learner's zone, or store them as the
+learner's local midnight.
+
+## The question-bank formatter has not been run against a real LLM
+
+`PROMPTS.questionBank.formatter` and the bank pipeline are covered by tests
+with a scripted LLM, and the code validates every item's structure, but no
+build has run against a real model yet. The owner's stop condition — at least
+five valid questions for typical topics — still needs checking: build a bank
+for a few typical topics after deploy (Regenerate on the topic page, or the
+repair script's backfill) and look at `questionBank.usableCount` and the
+file-processor's "Question bank pipeline finished" log line, which records
+extracted, reviewed, formatted and valid counts.
+
+## `tsx` is a global, not a dependency
+
+`pnpm build`, `pnpm dev` and the one-off scripts (`src/scripts/*.ts`, including
+`repairAndBackfill.ts`) run under `tsx`, which `package.json` does not list. The
+Dockerfile's build stage installs it globally (`npm i -g tsx`); locally it needs
+a global install, or `npx tsx …` downloads it on demand. The runtime images ship
+only `dist/`, so the scripts run from a source checkout pointed at the target
+environment.
+
 ## Storage notifications go over HTTP, by necessity
 
 Object storage is **SeaweedFS**, not MinIO. There is no direct
@@ -97,29 +148,11 @@ failure surfaces late and asynchronously.
 
 ## Some Zod schemas live in the controller, not in `src/schemas/`
 
-`markRevisedSchema`, `updateTopicSchema`, `fileInfoSchema`, and `uploadFilesSchema`
-are declared inline at the top of `topicController.ts` — including an `import`
-statement halfway down the declaration block. The convention elsewhere is
-`src/schemas/*.schema.ts` re-exported through `index.ts`. Move them there if you
-touch them.
-
-`updateTopicSchema` also accepts `urls`, which the route's JSDoc does not mention,
-and `updateTopic` gives no indication that newly added URLs are queued for extraction.
-
-## Route JSDoc drift
-
-`chatRoutes.ts` documents `POST /api/chat/complete` as taking `llmQuality` in the
-body. It does not — `completeChatSessionSchema` accepts only
-`{ sessionId, topicId, userQuality }`, and the controller computes `llmQuality`
-itself from the transcript. The schema is authoritative.
-
-## Quality range mismatch
-
-`completeChatSessionSchema` accepts `userQuality` 0–5, but `RevisionRecord` requires
-`min: 1` on `userQuality`, `llmQuality`, and `finalQuality`. A self-rating of 0 —
-which SM-2 treats as a legitimate total blackout — passes request validation and then
-fails Mongoose validation inside `recordRevision`, surfacing as a 500. The topic
-route's `markRevisedSchema` uses 1–5 and is consistent with the model.
+`fileInfoSchema` and `uploadFilesSchema` are still declared inline at the top of
+`topicController.ts` — including an `import` statement halfway down the
+declaration block. The convention elsewhere is `src/schemas/*.schema.ts`
+re-exported through `index.ts` (`markRevisedSchema` and `updateTopicSchema` have
+moved there). Move them if you touch them.
 
 ## `urls` cannot be an empty array
 
@@ -164,43 +197,56 @@ scripts.
 An empty file at the repo root, untracked. Scratch output from a type-check run.
 Safe to delete.
 
+## Resolved in the due-queue release
+
+Kept briefly so older notes and commits make sense:
+
+- **Quality range mismatch.** `RevisionRecord` now accepts 0 on all three quality
+  fields, and `/revised` takes 0–5, so a total-blackout rating saves.
+- **Same-day undo toggle.** A second `POST /:id/revised` on the same day used to
+  delete the first review — including an AI-chat review the page had just
+  recorded. Reviews are now one per learner-day, recorded once, never undone;
+  the second attempt gets `409 ALREADY_REVIEWED_TODAY`.
+- **Time zone always `Asia/Calcutta`.** The due list and statistics read
+  `req.headers["X-Local-TimeZone"]?.[0]` (an always-undefined, mixed-case key).
+  They now use the learner-day helper.
+- **Uploaded files had no entries** (the `$push` was removed in `b014bc4`), so they
+  never appeared on the topic page. Entries are created at upload-URL time and
+  upserted by the worker.
+- **Saving the URL list reset every URL to pending.** It now diffs the list.
+- **Chat start kept going after `CONTENT_NOT_FOUND`.** It now returns.
+- **Route JSDoc drift** on `POST /api/chat/complete` (`llmQuality` is not a
+  request field) is fixed in `chatRoutes.ts`.
+- **`mindMapGenerator.ts` relative import** — all services use aliases now.
+
 ---
 
 ## Failing test suites
 
-Full detail in [testing.md](testing.md). Causes, grouped:
+Full detail in [testing.md](testing.md). As of the due-queue release: **9 of 43
+suites fail, 34 pass; 502 tests pass, 16 fail.** No production code is broken by
+any of these; none has been repaired (out of scope for that release).
 
-**Relative `.js` imports jest cannot resolve** — the source file uses a relative
-`.js` import instead of an alias, so the test importing it dies:
-- `s3Storage.test.ts` ← `s3Storage.ts` imports `../config/s3.js`
-- `fileExtractor.test.ts` ← `fileExtractor.ts` imports `./llmClient.js`
-- `mindMapGenerator.test.ts` ← `mindMapGenerator.ts` imports `./s3Storage.js`
+**Compile now, but assert stale behaviour** (they started compiling once the
+`req.userId` augmentation moved to `src/types/express.d.ts` and services used
+aliases):
+- `statisticsController.test.ts` — 11 tests create topics without the required
+  `userId`, so `Topic.create` fails validation.
+- `fileExtractor.test.ts` — 5 URL tests expect the old LLM formatting path;
+  `extractFromURL` now returns Jina output (and is a dead branch anyway, see
+  "Duplicated URL extraction logic").
 
-Switching those source imports to aliases (`@config/s3.js`, `@services/llmClient.js`)
-fixes all three.
+`createTopicController.test.ts` and `mindMapGenerator.test.ts` compiled for the
+same reasons and pass.
 
-**`req.userId` not on `Express.Request`** — `createTopicController.test.ts`,
-`statisticsController.test.ts`. The `declare global` augmentation lives in
-`src/middleware/auth.ts`, which `tsconfig.test.json` only includes when something
-transitively imports it. Moving the augmentation to a standalone
-`src/types/express.d.ts` would fix it globally.
-
-**Tests reference fields the schemas no longer have**:
+**Still fail to compile:**
 - `RevisionRecord.test.ts`, `topicController.test.ts`, `chatController.test.ts` —
   `previousEFactor`, `previousInterval` (never defined on `IRevisionRecord`)
 - `Topic.test.ts` — `fileUrl` on `IAttachedFile` (commented out in `Topic.ts` in
   favour of `s3Path` + `s3Bucket`)
-
-**Tests reference APIs that no longer exist**:
 - `llmClient.test.ts` — `@google/generative-ai`, replaced by the Vercel AI SDK
 - `publisher.test.ts` — `QueuePublisher.create`; the API is
   `await new QueuePublisher(cfg).init()`
-
-**Mongoose 9 typing** — `chatContext.test.ts` casts plain mock objects to `ITopic`;
-`Types.DocumentArray` no longer overlaps a bare array. Needs `as unknown as ITopic`
-or a real document factory.
-
-**No assertion failures.** As of the SeaweedFS migration the suites that *do* run
-are all green (153 tests). `fileProcessingMessageSchema` is now the flat
-`{ bucket, key }` the property tests always generated, which is also what
-`storageWebhookController` publishes.
+- `chatContext.test.ts` — Mongoose 9 typing: casts plain mock objects to
+  `ITopic`; `Types.DocumentArray` no longer overlaps a bare array. Needs
+  `as unknown as ITopic` or a real document factory.

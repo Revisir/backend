@@ -44,7 +44,16 @@ router.post(
 );
 /**
  * GET /api/topics/due
- * Get topics due for revision (revisionDate <= currentDate)
+ * Topics due in the learner's current day (revisionDate before the start of the
+ * learner's tomorrow), plus topics already reviewed today, most overdue first.
+ * "Today" comes from the X-Local-TimeZone header (IANA zone; UTC if missing or invalid).
+ *
+ * Every topic also carries the computed review fields (see .claude/docs/api.md):
+ * - lastQuality: number | null
+ * - estimatedRecall: number (0..1)
+ * - nextIntervals: number[6] (days until the next review for a rating 0..5 given now)
+ * - questionBank: { state, usableCount, rebuilding }  (never questions, answers or the retired list)
+ * - review: { doneToday, normalQuiz: { available, reason, questionCount }, aiQuiz: { available, reason } }
  *
  * Response:
  * - 200: { topics: Topic[] }
@@ -131,19 +140,20 @@ router.post("/:id/questions/regenerate", requireAIConfig, regenerateQuestions);
 
 /**
  * POST /api/topics/:id/revised
- * Mark topic as revised and create revision record with SM-2 algorithm
+ * Done: record the learner's own rating (method "self") and reschedule with SM-2.
+ * One review per topic per learner-day; there is no same-day undo.
  *
  * Path parameters:
  * - id: string (MongoDB ObjectId)
  *
  * Request body:
- * - userQuality: number (required, 1-5)
- * - llmQuality: number (optional, 1-5)
+ * - userQuality: number (required, 0-5)
  *
  * Response:
- * - 200: { success: true, nextRevisionDate: string, newInterval: number, newEFactor: number }
- * - 400: Validation error
- * - 404: Topic not found
+ * - 200: { success: true, nextRevisionDate: string, lastRevised: string, eFactor: number, interval: number, repetitionNumber: number, lastQuality: number }
+ * - 400: VALIDATION_ERROR
+ * - 404: TOPIC_NOT_FOUND
+ * - 409: ALREADY_REVIEWED_TODAY
  * - 500: Server error
  */
 router.post("/:id/revised", markTopicRevised);
@@ -174,7 +184,11 @@ router.post("/:id/reset", resetTopicProgress);
  * - topicName: string (optional, max 200 chars)
  * - subjectName: string (optional, max 100 chars)
  * - description: string (optional)
- * - dateStudied: string (optional, ISO date)
+ * - urls: string[] (optional) — the full URL list. Existing entries keep their status;
+ *   new http(s) URLs are queued for extraction, others are saved as failed;
+ *   removed URLs lose their extracted file, and the question bank is rebuilt (or cleared).
+ * - dateStudied: string (optional, YYYY-MM-DD or ISO date-time). Resets the schedule and
+ *   history only when it differs from the stored date in the learner's zone.
  *
  * Response:
  * - 200: { success: true, topic: Topic }
@@ -186,7 +200,8 @@ router.patch("/:id", updateTopic);
 
 /**
  * POST /api/topics/:id/files
- * Upload additional files to topic
+ * Upload additional files to topic. Creates a pending entry per file (keyed by its
+ * storage path) so it shows on the topic page while it uploads and extracts.
  *
  * Path parameters:
  * - id: string (MongoDB ObjectId)
@@ -204,7 +219,8 @@ router.post("/:id/files", uploadTopicFiles);
 
 /**
  * DELETE /api/topics/:id/files/:fileId
- * Delete a specific file from topic
+ * Delete a specific file from topic. Removing extracted material rebuilds the
+ * question bank from what remains, or clears it when nothing remains.
  *
  * Path parameters:
  * - id: string (MongoDB ObjectId)
@@ -234,13 +250,21 @@ router.delete("/:id", deleteTopic);
 
 /**
  * GET /api/topics/:id
- * Get topic details by ID
+ * Get topic details by ID. Every files[] and urls[] entry carries processingStatus,
+ * and errorReason when failed.
+ *
+ * Every topic also carries the computed review fields (see .claude/docs/api.md):
+ * - lastQuality: number | null
+ * - estimatedRecall: number (0..1)
+ * - nextIntervals: number[6] (days until the next review for a rating 0..5 given now)
+ * - questionBank: { state, usableCount, rebuilding }  (never questions, answers or the retired list)
+ * - review: { doneToday, normalQuiz: { available, reason, questionCount }, aiQuiz: { available, reason } }
  *
  * Path parameters:
  * - id: string (MongoDB ObjectId)
  *
  * Response:
- * - 200: Topic document
+ * - 200: Topic document with the review fields
  * - 400: Invalid topic ID format
  * - 404: Topic not found
  * - 500: Server error
