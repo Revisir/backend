@@ -49,6 +49,27 @@ repair script's backfill) and look at `questionBank.usableCount` and the
 file-processor's "Question bank pipeline finished" log line, which records
 extracted, reviewed, formatted and valid counts.
 
+## RabbitMQ consumers are not re-subscribed after a reconnect
+
+`ConnectionManager.handleReconnection` (`src/services/rabbitmq/connectionManager.ts`)
+re-establishes the connection and a fresh channel, but nothing re-registers the
+consumers that were on the old channel. A worker whose channel closes — a broker
+restart, a network drop, or a delivery left unacked past the broker's
+`consumer_timeout` (RabbitMQ default 30 min) — stays connected and silently stops
+consuming until the process restarts. Pre-existing for the file and URL consumers;
+the file-processor now runs two consumers (file extraction and question banks) on
+one channel, so a closed channel stops both. A long bank build can approach that
+timeout in a pathological case: each of its three LLM steps is retried up to three
+times, bounded only by fetch's default 300s timeouts. Fix by having consumers
+re-register on reconnect, or exiting the process so the orchestrator restarts it.
+
+## Extracted URL names can collide
+
+`extractedFileNameForUrl` keeps the first 100 sanitized characters of a URL, so
+two URLs on the same topic that share a long prefix write the same extracted
+object, and removing one of them deletes the object the other still points to.
+Pre-existing naming (the URL worker always did this); a hash suffix would fix it.
+
 ## `tsx` is a global, not a dependency
 
 `pnpm build`, `pnpm dev` and the one-off scripts (`src/scripts/*.ts`, including
