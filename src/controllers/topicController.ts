@@ -5,6 +5,9 @@ import { generateMindMap } from "@services/mindMapGenerator.js";
 import { generatePresignedUploadUrl, deleteTopicFiles, deleteFile, deleteByPath, getSignedContentUrl } from "@services/s3Storage.js";
 import { recordRevision, AlreadyReviewedTodayError, TopicNotFoundError } from "@services/reviewRecorder.js";
 import { getLearnerDay, changedStudyDate } from "@services/learnerDay.js";
+import { withReviewState, type ReviewContext } from "@services/reviewAvailability.js";
+import { retentionAt } from "@services/sm2Algorithm.js";
+import { isAIConfigured } from "@middleware/aiConfigCheck.js";
 import { GetTopicsResponse } from "$types/topic.types.js";
 import { ErrorResponse } from "$types/common.types.js";
 import { getTopicsQuerySchema, topicIdParamSchema, topicFileParamSchema, markRevisedSchema, updateTopicSchema } from "@/schemas/index.js";
@@ -121,7 +124,10 @@ export async function getTopicById(req: Request, res: Response): Promise<void> {
     );
     const urls = (topic.urls || []).map(({ errorReason, ...url }) => ({ ...url, ...statusFields({ processingStatus: url.processingStatus, errorReason }) }));
 
-    res.status(200).json({ ...topic, files, urls });
+    // Review fields come from the stored attachments, before files and URLs are reshaped.
+    const day = getLearnerDay(req);
+    const ctx: ReviewContext = { day, now: day.now, aiConfigured: isAIConfigured() };
+    res.status(200).json({ ...withReviewState(topic, ctx), files, urls });
   } catch (error) {
     log.error({ err: error }, "Error fetching topic by ID");
 
@@ -142,8 +148,10 @@ export async function getTopicById(req: Request, res: Response): Promise<void> {
 export async function getDueTopics(req: Request, res: Response): Promise<void> {
   try {
     const day = getLearnerDay(req);
+    const ctx: ReviewContext = { day, now: day.now, aiConfigured: isAIConfigured() };
     // Due today in the learner's zone, plus anything already finished today so
     // the queue can keep showing it as done for the rest of the day (R12).
+    // Bank questions and the retired list are select: false and stay out.
     const dueTopics = await Topic.find({
       userId: req.userId,
       $or: [{ revisionDate: { $lt: day.tomorrowStart } }, { lastRevised: { $gte: day.start, $lt: day.tomorrowStart } }],
@@ -151,7 +159,7 @@ export async function getDueTopics(req: Request, res: Response): Promise<void> {
       .sort({ revisionDate: 1 })
       .lean();
 
-    res.status(200).json({ topics: dueTopics });
+    res.status(200).json({ topics: dueTopics.map((topic) => withReviewState(topic, ctx)) });
   } catch (error) {
     log.error({ err: error }, "Error fetching due topics");
 
@@ -204,11 +212,9 @@ export async function getForgettingCurve(req: Request, res: Response): Promise<v
       .lean();
 
     // Build curve segments: each revision resets retention to 100%
-    // Between revisions, retention decays exponentially: R(t) = e^(-t/S)
-    // Stability S is derived from the interval (days where R drops to ~0.9 threshold from SM-2)
-    // We use S = -interval / ln(0.9) ≈ interval * 9.49 (assuming SM-2 targets 90% at interval boundary)
-    const RETENTION_THRESHOLD = 0.9;
-    const stabilityFactor = -1 / Math.log(RETENTION_THRESHOLD); // ≈ 9.49
+    // Between revisions, retention decays exponentially: R(t) = e^(-t/S), with
+    // S = interval / -ln(0.9) so retention is 0.9 when a review falls due.
+    // `retentionAt` is the same model the recall estimate uses (KTD12).
 
     interface CurvePoint {
       date: string;
@@ -229,14 +235,13 @@ export async function getForgettingCurve(req: Request, res: Response): Promise<v
 
     if (history.length === 0) {
       // No revisions yet — show decay from dateStudied to now (or revisionDate, whichever is later)
-      const stability = topic.interval * stabilityFactor;
       const endDate = new Date(Math.max(Date.now(), topic.revisionDate.getTime()));
       const totalDays = Math.ceil((endDate.getTime() - anchorDate.getTime()) / 86400000);
       const step = Math.max(1, Math.floor(totalDays / 60)); // cap at ~60 points
 
       for (let d = 0; d <= totalDays; d += step) {
         const pointDate = new Date(anchorDate.getTime() + d * 86400000);
-        const retention = Math.exp(-d / stability);
+        const retention = retentionAt(d, topic.interval);
         curvePoints.push({
           date: pointDate.toISOString().split("T")[0],
           retention: Math.round(retention * 1000) / 1000,
@@ -250,13 +255,12 @@ export async function getForgettingCurve(req: Request, res: Response): Promise<v
       for (let i = 0; i < history.length; i++) {
         const record = history[i];
         const revDate = new Date(record.revisionDate);
-        const stability = currentInterval * stabilityFactor;
         const segmentDays = Math.ceil((revDate.getTime() - segmentStart.getTime()) / 86400000);
         const step = Math.max(1, Math.floor(segmentDays / 30));
 
         for (let d = 0; d < segmentDays; d += step) {
           const pointDate = new Date(segmentStart.getTime() + d * 86400000);
-          const retention = Math.exp(-d / stability);
+          const retention = retentionAt(d, currentInterval);
           curvePoints.push({
             date: pointDate.toISOString().split("T")[0],
             retention: Math.round(retention * 1000) / 1000,
@@ -283,14 +287,13 @@ export async function getForgettingCurve(req: Request, res: Response): Promise<v
       // Final segment: from last revision to now or next revision date
       const lastRevision = history[history.length - 1];
       const lastRevDate = new Date(lastRevision.revisionDate);
-      const stability = lastRevision.newInterval * stabilityFactor;
       const endDate = new Date(Math.max(Date.now(), topic.revisionDate.getTime()));
       const finalDays = Math.ceil((endDate.getTime() - lastRevDate.getTime()) / 86400000);
       const step = Math.max(1, Math.floor(finalDays / 30));
 
       for (let d = 1; d <= finalDays; d += step) {
         const pointDate = new Date(lastRevDate.getTime() + d * 86400000);
-        const retention = Math.exp(-d / stability);
+        const retention = retentionAt(d, lastRevision.newInterval);
         curvePoints.push({
           date: pointDate.toISOString().split("T")[0],
           retention: Math.round(retention * 1000) / 1000,
