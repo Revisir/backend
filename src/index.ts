@@ -10,6 +10,7 @@ import statisticsRoutes from "@routes/statisticsRoutes.js";
 import chatRoutes from "@routes/chatRoutes.js";
 import subjectRoutes from "@routes/subjectRoutes.js";
 import internalRoutes from "@routes/internalRoutes.js";
+import quizRoutes from "@routes/quizRoutes.js";
 import { initRabbitMQ, Publishers } from "@services/rabbitmq/index.js";
 
 const app = express();
@@ -37,6 +38,7 @@ app.use("/api/topics", topicRoutes);
 app.use("/api/statistics", statisticsRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/subjects", subjectRoutes);
+app.use("/api/quiz", quizRoutes);
 
 // Start server
 const startServer = async () => {

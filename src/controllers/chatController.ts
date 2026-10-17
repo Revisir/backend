@@ -5,7 +5,7 @@ import { buildChatContext, assessStudentPerformance } from "@services/chatContex
 import { generateQuestions, evaluateAnswer } from "@services/questionAgent.js";
 import { ErrorResponse } from "$types/common.types.js";
 import { startChatSessionSchema, sendChatMessageSchema, completeChatSessionSchema } from "@/schemas/index.js";
-import { recordRevision, findSessionRevision, AlreadyReviewedTodayError } from "@services/reviewRecorder.js";
+import { recordRevision, AlreadyReviewedTodayError } from "@services/reviewRecorder.js";
 import { getLearnerDay, isReviewedToday } from "@services/learnerDay.js";
 import { logger } from "@config/logger.js";
 
@@ -238,16 +238,12 @@ export async function completeChatSession(req: Request, res: Response): Promise<
 
     let result: { nextRevisionDate: Date; finalQuality: number };
     try {
+      // A concurrent completion of this same session returns that completion's review.
       result = await recordRevision({ userId: req.userId!, topicId: topic._id, userQuality, llmQuality, method: "ai_quiz", sessionId: chatSession._id, day });
     } catch (err) {
       if (!(err instanceof AlreadyReviewedTodayError)) throw err;
-      // A concurrent completion of this same session may have won the day claim.
-      const existing = await findSessionRevision(req.userId!, chatSession._id);
-      if (!existing) {
-        sendAlreadyReviewed(res);
-        return;
-      }
-      result = { nextRevisionDate: existing.nextRevisionDate, finalQuality: existing.finalQuality };
+      sendAlreadyReviewed(res);
+      return;
     }
 
     log.info({ result }, "Revision recorded");

@@ -104,6 +104,23 @@ describe("recordRevision (day claim)", () => {
     expect(await RevisionRecord.countDocuments({ topicId: topic._id })).toBe(1);
   });
 
+  it("returns the same review to concurrent completions of one session, writing one record", async () => {
+    const topic = await createTopic();
+    const day = ny("2026-03-10T15:00:00.000Z");
+    const sessionId = new Types.ObjectId();
+
+    const results = await Promise.all(
+      [5, 5, 5].map((q) => recordRevision({ userId: USER, topicId: topic._id, userQuality: q, method: "normal_quiz", quizScored: 5, quizCorrect: 5, sessionId, day })),
+    );
+
+    expect(await RevisionRecord.countDocuments({ topicId: topic._id })).toBe(1);
+    const dates = new Set(results.map((r) => r.nextRevisionDate.toISOString()));
+    expect(dates.size).toBe(1);
+    results.forEach((r) => expect(r.finalQuality).toBe(5));
+    // A different session that day is still refused.
+    await expect(recordRevision({ userId: USER, topicId: topic._id, userQuality: 4, method: "normal_quiz", sessionId: new Types.ObjectId(), day })).rejects.toBeInstanceOf(AlreadyReviewedTodayError);
+  });
+
   it("records a review at 23:30 local and another at 00:30 the next local day", async () => {
     const topic = await createTopic();
 

@@ -108,6 +108,8 @@ export interface ITopic extends Document {
   interval: number;
   /** Final rating (0–5) of the latest review; null before the first. Older AI reviews may hold halves. */
   lastQuality: number | null;
+  /** The chat or quiz session whose completion recorded the latest review, if any. */
+  lastReviewSessionId: Types.ObjectId | null;
   urls: Types.DocumentArray<IAttachedUrl>;
   files: Types.DocumentArray<IAttachedFile>;
   questionBank: IQuestionBank;
@@ -288,6 +290,10 @@ const TopicSchema = new Schema<ITopic>(
       default: null,
       min: 0,
       max: 5,
+    },
+    lastReviewSessionId: {
+      type: Schema.Types.ObjectId,
+      default: null,
     },
     urls: {
       type: [AttachedUrlSchema],

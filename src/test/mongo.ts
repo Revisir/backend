@@ -2,27 +2,33 @@ import express, { type Express, type Router } from "express";
 import mongoose from "mongoose";
 import { MongoMemoryServer } from "mongodb-memory-server";
 
+const MONGO_HOOK_TIMEOUT_MS = 120_000;
+
 /**
  * Starts one in-memory MongoDB for the calling suite and wipes every collection
  * between tests. Call at the top level of a test file.
  */
 export function useMongoMemoryServer(): void {
-  let server: MongoMemoryServer;
+  let server: MongoMemoryServer | undefined;
 
+  // Starting mongod can take well over Jest's 5s hook default when several
+  // suites start one at once.
   beforeAll(async () => {
     server = await MongoMemoryServer.create();
     await mongoose.connect(server.getUri());
-  });
+  }, MONGO_HOOK_TIMEOUT_MS);
 
   afterEach(async () => {
-    const collections = await mongoose.connection.db!.collections();
+    const db = mongoose.connection.db;
+    if (!db) return;
+    const collections = await db.collections();
     await Promise.all(collections.map((c) => c.deleteMany({})));
   });
 
   afterAll(async () => {
     await mongoose.disconnect();
-    await server.stop();
-  });
+    await server?.stop();
+  }, MONGO_HOOK_TIMEOUT_MS);
 }
 
 /** Header the tests use to act as a specific user. */

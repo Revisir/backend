@@ -64,7 +64,11 @@ export function finalQualityOf(userQuality: number, llmQuality?: number | null):
  * write fails, the topic is restored to its previous schedule. MongoDB runs as
  * a standalone server in deployment, so there is no transaction to lean on.
  *
- * @throws AlreadyReviewedTodayError when the learner-day is already claimed
+ * Idempotent per session: when the day was claimed by the same chat or quiz
+ * session (a retry, a second tab, or two near-simultaneous finishes), the
+ * review that session recorded is returned instead of an error.
+ *
+ * @throws AlreadyReviewedTodayError when the learner-day is already claimed by another review
  * @throws TopicNotFoundError when the topic is missing or not the user's
  */
 export async function recordRevision(input: RecordRevisionInput): Promise<RevisionResult> {
@@ -72,10 +76,10 @@ export async function recordRevision(input: RecordRevisionInput): Promise<Revisi
   const now = day.now;
 
   const topic = await Topic.findOne({ _id: topicId, userId })
-    .select("eFactor interval repetitionNumber revisionDate lastRevised lastQuality")
+    .select("eFactor interval repetitionNumber revisionDate lastRevised lastQuality lastReviewSessionId")
     .lean();
   if (!topic) throw new TopicNotFoundError();
-  if (topic.lastRevised && topic.lastRevised.getTime() >= day.start.getTime()) throw new AlreadyReviewedTodayError();
+  if (topic.lastRevised && topic.lastRevised.getTime() >= day.start.getTime()) return sameSessionReview(userId, topicId, sessionId);
 
   const finalQuality = finalQualityOf(userQuality, llmQuality);
   const schedule = calculateNextReview(
@@ -93,11 +97,12 @@ export async function recordRevision(input: RecordRevisionInput): Promise<Revisi
         revisionDate: schedule.nextRevisionDate,
         lastRevised: now,
         lastQuality: finalQuality,
+        lastReviewSessionId: sessionId ?? null,
       },
     },
     { new: true, projection: { _id: 1 } },
   ).lean();
-  if (!claimed) throw new AlreadyReviewedTodayError();
+  if (!claimed) return sameSessionReview(userId, topicId, sessionId);
 
   try {
     await RevisionRecord.create({
@@ -127,6 +132,7 @@ export async function recordRevision(input: RecordRevisionInput): Promise<Revisi
           revisionDate: topic.revisionDate,
           lastRevised: topic.lastRevised ?? null,
           lastQuality: topic.lastQuality ?? null,
+          lastReviewSessionId: topic.lastReviewSessionId ?? null,
         },
       },
     );
@@ -144,11 +150,37 @@ export async function recordRevision(input: RecordRevisionInput): Promise<Revisi
   };
 }
 
+/** How long a same-session completion waits for the winning completion's record. */
+const SESSION_REVIEW_WAIT_MS = 2_000;
+const SESSION_REVIEW_POLL_MS = 50;
+
 /**
- * The review a chat or quiz session already recorded, if any. A completion that
- * loses the day claim to a concurrent completion of the *same* session uses
- * this to return the winner's result instead of an error.
+ * The day is already claimed. When this session holds the claim, returns the
+ * review it recorded, waiting briefly for a concurrent completion to finish
+ * writing it. Otherwise, or if that record never appears, the topic was
+ * reviewed by something else today.
  */
-export async function findSessionRevision(userId: string, sessionId: string | Types.ObjectId) {
-  return RevisionRecord.findOne({ userId, sessionId }).lean();
+async function sameSessionReview(userId: string, topicId: string | Types.ObjectId, sessionId?: string | Types.ObjectId): Promise<RevisionResult> {
+  if (!sessionId) throw new AlreadyReviewedTodayError();
+  const holder = await Topic.findOne({ _id: topicId, userId }).select("lastReviewSessionId repetitionNumber").lean();
+  if (!holder?.lastReviewSessionId || String(holder.lastReviewSessionId) !== String(sessionId)) throw new AlreadyReviewedTodayError();
+
+  const deadline = Date.now() + SESSION_REVIEW_WAIT_MS;
+  for (;;) {
+    const record = await RevisionRecord.findOne({ userId, topicId, sessionId }).lean();
+    if (record) {
+      return {
+        nextRevisionDate: record.nextRevisionDate,
+        lastRevised: record.revisionDate,
+        eFactor: record.newEFactor,
+        interval: record.newInterval,
+        repetitionNumber: holder.repetitionNumber,
+        lastQuality: record.finalQuality,
+        finalQuality: record.finalQuality,
+      };
+    }
+    // The winner claimed the day but has not written its record (or failed and is restoring).
+    if (Date.now() >= deadline) throw new AlreadyReviewedTodayError();
+    await new Promise((resolve) => setTimeout(resolve, SESSION_REVIEW_POLL_MS));
+  }
 }
