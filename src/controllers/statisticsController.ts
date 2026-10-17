@@ -4,6 +4,7 @@ import { RevisionRecord } from "@models/RevisionRecord.js";
 import { DuePerSubject, StatisticsResponse } from "$types/statistics.types.js";
 import { ErrorResponse } from "$types/common.types.js";
 import { DateTime } from "luxon";
+import { getLearnerDay } from "@services/learnerDay.js";
 import { logger } from "@config/logger.js";
 
 const log = logger.child({ module: "statisticsController" });
@@ -14,8 +15,8 @@ const log = logger.child({ module: "statisticsController" });
  */
 export async function getStatistics(req: Request, res: Response): Promise<void> {
   try {
-    const timeZone = req.headers["X-Local-TimeZone"]?.[0] ?? "Asia/Calcutta";
-    const currentDate = DateTime.now().setZone(timeZone).endOf("day");
+    const day = getLearnerDay(req);
+    const currentDate = DateTime.fromJSDate(day.now).setZone(day.zone).endOf("day");
     const userId = req.userId; // From auth middleware
 
     // Calculate date ranges

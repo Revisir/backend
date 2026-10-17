@@ -18,5 +18,20 @@ export const fileProcessingMessageSchema = z.object({
   key: z.string().min(1),
 });
 
+export const QUESTION_BANK_BUILD_REASONS = ["materials_settled", "material_removed", "regenerate", "backfill", "sweep", "follow_up"] as const;
+
+/**
+ * A request to (re)build one topic's question bank. `requestedAt` is compared
+ * with the bank's last successful build so duplicate requests cost nothing.
+ */
+export const questionBankMessageSchema = z.object({
+  topicId: z.string().min(1),
+  userId: z.string().min(1),
+  requestedAt: z.iso.datetime(),
+  reason: z.enum(QUESTION_BANK_BUILD_REASONS),
+});
+
 export type UrlProcessingMessage = z.infer<typeof urlProcessingMessageSchema>;
 export type FileProcessingMessage = z.infer<typeof fileProcessingMessageSchema>;
+export type QuestionBankMessage = z.infer<typeof questionBankMessageSchema>;
+export type QuestionBankBuildReason = (typeof QUESTION_BANK_BUILD_REASONS)[number];

@@ -2,21 +2,13 @@ import { Request, Response } from "express";
 import { Topic } from "@models/Topic.js";
 import { calculateNextReview } from "@services/sm2Algorithm.js";
 import { generatePresignedUploadUrl } from "@services/s3Storage.js";
-import { Publishers } from "@services/rabbitmq/index.js";
+import { newUrlEntries, pendingFileEntry, queueUrlsOrMarkFailed } from "@services/topicMaterials.js";
 import { CreateTopicResponse } from "$types/createTopic.types.js";
 import { ErrorResponse } from "$types/common.types.js";
 import { createTopicSchema } from "@/schemas/index.js";
 import { logger } from "@config/logger.js";
 
 const log = logger.child({ module: "createTopicController" });
-
-/**
- * Filters URLs to only those with http:// or https:// scheme.
- * Used to determine which URLs are publishable to the URL processing queue.
- */
-export function filterPublishableUrls(urls: string[]): string[] {
-  return urls.filter((u) => u.startsWith("http://") || u.startsWith("https://"));
-}
 
 /**
  * POST /api/topics
@@ -46,12 +38,15 @@ export async function createTopic(req: Request, res: Response): Promise<void> {
       quality: 3,
     });
 
+    const now = new Date();
+    const { entries: urlEntries, publishable } = newUrlEntries([...new Set(urls ?? [])], now);
+
     const topic = new Topic({
       userId: req.userId!,
       topicName: topicName.trim(),
       subjectName: subjectName.trim(),
       description: description?.trim() || "",
-      urls: urls?.map((url) => ({ url })) || [],
+      urls: urlEntries,
       dateStudied: dateStudiedParsed,
       revisionDate: sm2Result.nextRevisionDate,
       lastRevised: null,
@@ -61,26 +56,30 @@ export async function createTopic(req: Request, res: Response): Promise<void> {
       files: [],
     });
 
-    await topic.save();
+    // Issuing the upload URLs validates each declared file (type, size, path),
+    // so a rejected file fails the request before anything is saved.
+    const uploadUrls = await Promise.all(
+      (files ?? []).map(async (file) => ({
+        fileName: file.fileName,
+        uploadUrl: await generatePresignedUploadUrl(req.userId!, topic._id.toString(), file.fileName, file.contentType, file.size),
+      })),
+    );
 
-    if (urls?.length) {
-      const processableUrls = filterPublishableUrls(urls);
-      if (processableUrls.length && Publishers.url) {
-        try {
-          await Publishers.url.publish({
-            message: { topicId: topic._id.toString(), userId: req.userId!, urls: processableUrls },
-          });
-        } catch (err) {
-          log.error({ err, topicId: topic._id.toString(), urls: processableUrls }, "Failed to publish URL processing message");
-        }
-      }
+    // A pending entry per declared file, so the topic page and the
+    // all-attachments-settled check see uploads still on their way (KTD13).
+    const declaredFiles = [...new Map((files ?? []).map((f) => [f.fileName, f])).values()];
+    for (const file of declaredFiles) {
+      topic.files.push(pendingFileEntry(req.userId!, topic._id.toString(), file, now));
     }
 
-    const uploadUrls =
-      files?.map((file) => ({
-        fileName: file.fileName,
-        uploadUrl: generatePresignedUploadUrl(req.userId!, topic._id.toString(), file.fileName, file.contentType, file.size),
-      })) || [];
+    await topic.save();
+
+    try {
+      await queueUrlsOrMarkFailed(topic._id.toString(), req.userId!, publishable, now);
+    } catch (err) {
+      // The topic is saved either way; a URL left pending is failed by the staleness sweep.
+      log.error({ err, topicId: topic._id.toString(), urls: publishable }, "Failed to record unqueued URLs");
+    }
 
     const response: CreateTopicResponse = {
       topicId: topic._id.toString(),
@@ -90,12 +89,7 @@ export async function createTopic(req: Request, res: Response): Promise<void> {
       dateStudied: topic.dateStudied.toISOString(),
       revisionDate: topic.revisionDate.toISOString(),
       isDue: topic.isDue,
-      uploadUrls: await Promise.all(
-        uploadUrls.map(async (u) => ({
-          fileName: u.fileName,
-          uploadUrl: await u.uploadUrl,
-        })),
-      ),
+      uploadUrls,
     };
 
     res.status(201).json(response);

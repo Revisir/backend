@@ -9,6 +9,26 @@ export interface UploadKeyParts {
   fileName: string;
 }
 
+/** The object key an upload is stored under, and the `s3Path` of its file entry. */
+export function buildUploadKey(userId: string, topicId: string, fileName: string): string {
+  return `${userId}/${topicId}/files/${fileName}`;
+}
+
+/** Where the file worker writes an upload's extracted markdown. */
+export function extractedKeyForFile(userId: string, topicId: string, fileName: string): string {
+  return `${userId}/${topicId}/extracted/${fileName}.md`;
+}
+
+/** File name the URL worker gives a URL's extracted markdown, under `{userId}/{topicId}/extracted/`. */
+export function extractedFileNameForUrl(url: string): string {
+  return `url_${url.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 100)}.md`;
+}
+
+/** Where the URL worker writes a URL's extracted markdown. */
+export function extractedKeyForUrl(userId: string, topicId: string, url: string): string {
+  return `${userId}/${topicId}/extracted/${extractedFileNameForUrl(url)}`;
+}
+
 /**
  * Derives the owning user, topic and original file name from an upload key.
  *

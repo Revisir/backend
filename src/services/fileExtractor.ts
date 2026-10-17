@@ -1,6 +1,6 @@
-import { getLLMClient } from './llmClient.js';
+import { getLLMClient } from '@services/llmClient.js';
 import { PROMPTS } from '@config/prompts.js';
-import { readUrlForStudy } from './jinaReader.js';
+import { readUrlForStudy } from '@services/jinaReader.js';
 
 /**
  * File Content Extractor Service

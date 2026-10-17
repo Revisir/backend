@@ -20,7 +20,19 @@ import { RABBITMQ_CONFIG, RABBITMQ_URL } from "@config/rabbitmq.js";
 export class Publishers {
   static url: QueuePublisher;
   static file: QueuePublisher;
+  /** Set in the API by initRabbitMQ, and in each worker process by its consumer startup. */
+  static questionBank?: QueuePublisher;
   static connectionManager: ConnectionManager;
+}
+
+/** Declares the question-bank queue and returns its publisher. */
+export async function initQuestionBankPublisher(): Promise<QueuePublisher> {
+  return new QueuePublisher({
+    queue: RABBITMQ_CONFIG.QUESTION_BANK_QUEUE,
+    exchange: RABBITMQ_CONFIG.QUESTION_BANK_EXCHANGE,
+    routingKey: RABBITMQ_CONFIG.QUESTION_BANK_ROUTING_KEY,
+    dlqName: RABBITMQ_CONFIG.QUESTION_BANK_DLQ,
+  }).init();
 }
 
 /**
@@ -47,4 +59,6 @@ export async function initRabbitMQ(): Promise<void> {
     routingKey: RABBITMQ_CONFIG.FILE_PROCESSING_ROUTING_KEY,
     dlqName: RABBITMQ_CONFIG.FILE_PROCESSING_DLQ,
   }).init();
+
+  Publishers.questionBank = await initQuestionBankPublisher();
 }

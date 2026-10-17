@@ -10,18 +10,22 @@ npx jest -t "test name substring"   # single test
 
 ## Current state — read this before you trust a red run
 
-As of the last full run: **11 of 26 suites fail to run, 15 pass; 153 tests pass,
-0 fail.**
+As of the due-queue release: **9 of 43 suites fail, 34 pass; 502 tests pass,
+16 fail.**
 
-None of that is production-code breakage. All 11 red suites never reach their
-assertions — they fail at compile or module-resolution time because the tests were
-written against earlier versions of the schemas, the LLM client, and the publisher
-API. A red suite here does not mean your change broke something. Diff the failure
-against the list in [known-gaps.md](known-gaps.md#failing-test-suites) first.
+None of that is production-code breakage. Seven red suites never reach their
+assertions — they fail at compile time because they were written against
+earlier versions of the schemas, the LLM client and the publisher API. Two
+(`statisticsController`, `fileExtractor`) compile but assert stale behaviour
+(16 tests). A red suite here does not mean your change broke something. Diff the
+failure against the list in [known-gaps.md](known-gaps.md#failing-test-suites)
+first.
 
-The 15 suites that do pass — including the SM-2 unit tests, `s3Storage`, and all six
-RabbitMQ property suites — are the real regression net. **Keep those green, and
-keep the test count at 153 or above.**
+The 34 passing suites are the regression net: the 15 that passed before the
+due-queue release (SM-2, `s3Storage`, the RabbitMQ property suites, …) plus the
+release's own suites for learner days, review writes, attachments, the question
+bank and its queue, the normal quiz, review availability and the launch repair.
+**Keep them green, and keep the passing count at 502 or above.**
 
 ## Setup
 
@@ -36,6 +40,12 @@ keep the test count at 153 or above.**
 - `moduleNameMapper` re-declares every path alias, in both bare and `.js`-suffixed
   form
 
+- `setupFiles` runs `src/test/setupEnv.cjs`, which sets `LOG_LEVEL=fatal` unless a
+  level is already set — Bunyan writes straight to stdout, so otherwise every
+  log line lands in the run
+- `tsconfig.test.json` also includes `src/types/**/*.d.ts` (the `req.userId`
+  augmentation) and `src/test/**/*.ts` (helpers); the build excludes `src/test/`
+
 Two consequences of that setup that bite regularly:
 
 1. **A new path alias must be added to `jest.config.cjs` as well as `tsconfig.json`.**
@@ -44,7 +54,8 @@ Two consequences of that setup that bite regularly:
    unresolvable under jest and takes the importing suite down with it — including
    via a barrel, so `src/schemas/index.ts` and `src/services/rabbitmq/index.ts` both
    re-export through aliases for this reason. Always use the alias form in source.
-   `mindMapGenerator.ts` (`./s3Storage.js`) is the one remaining offender.
+   (The only relative imports left are the rabbitmq classes' type-only imports,
+   which erase at compile time, and `src/scripts/seedData.ts`, which no test loads.)
 
 ## Test kinds
 
@@ -77,6 +88,8 @@ Existing property suites:
 | `controllers/__properties__/webhookFiltering.property.test.ts` | webhook preserves bucket/key — **cannot compile, module missing** |
 | `lambda/__properties__/extractedKeyFiltering.property.test.ts` | `/extracted/` keys are skipped |
 | `models/__properties__/processingStatus.property.test.ts` | only legal status transitions |
+| `services/__properties__/questionText.property.test.ts` | question-text normalization is idempotent and ignores case, spacing, trailing punctuation |
+| `services/__properties__/quizScoring.property.test.ts` | quiz rating never falls as the share correct rises; band edges at 100/80/60/40/20% |
 
 This is why so much logic is pulled out as small pure exports — `computeBackoffDelay`,
 `isTransientError`, `shouldSkipExtractedKey`, `filterPublishableUrls`,
@@ -94,9 +107,22 @@ MongoDB in model and controller tests. `aws-sdk-client-mock` mocks the S3 client
 `supertest` is available for HTTP-level tests. `resetLLMClient()` exists specifically
 so a test can swap the LLM singleton.
 
-Note: `jest.config.cjs` does **not** set the `@shelf/jest-mongodb` preset — the
-ts-jest preset is used instead — so suites needing a live Mongo wire it up
-themselves. Follow whatever the nearest existing model test does.
+Note: `jest.config.cjs` does **not** set the `@shelf/jest-mongodb` preset. Use the
+shared helper in `src/test/mongo.ts` instead (import it relatively,
+`../test/mongo`):
+
+- `useMongoMemoryServer()` — call at the top level of a suite: one in-memory
+  mongod per suite, every collection wiped after each test, generous hook
+  timeouts (mongod can take well over 5s to start when suites run in parallel).
+- `buildTestApp({ "/api/topics": topicRoutes })` — an Express app with the
+  routers mounted and a stand-in for auth: `req.userId` comes from the
+  `x-test-user` header, defaulting to `"user-1"`.
+- `freezeDate(date)` — fakes only `Date` (timers stay real, so Mongo and HTTP
+  keep working); pair with `jest.useRealTimers()` in `afterEach`.
+
+Time-dependent services take an explicit `now` (or a `LearnerDay`) so most
+tests never need `freezeDate`. Mock the LLM with `jest.mock("@services/llmClient",
+…)` and script `sendTextPrompt`; mock workers' S3 with `mockClient(S3Client)`.
 
 ## Writing a new test
 

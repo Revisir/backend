@@ -14,7 +14,7 @@
 | URL extraction | Jina Reader (HTTP, no SDK), Tavily, Exa, Firecrawl |
 | Auth | `jose` — remote JWKS verification against Cognito |
 | Validation | Zod 4 |
-| Dates | Luxon (`recordRevision` uses UTC) |
+| Dates | Luxon. Product "today" is the learner's day from `X-Local-TimeZone` (`src/services/learnerDay.ts`) |
 | Logging | Bunyan, bridged to OTel |
 | Telemetry | OpenTelemetry SDK + auto-instrumentations, OTLP/HTTP-proto |
 | Build | esbuild — 4 bundles, ESM, minified, sourcemaps, `packages: "external"` |

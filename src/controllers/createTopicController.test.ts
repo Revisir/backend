@@ -70,10 +70,8 @@ jest.mock("$types/createTopic.types", () => ({}));
 jest.mock("$types/common.types", () => ({}));
 
 // Import controller after mocks
-import {
-  createTopic,
-  filterPublishableUrls,
-} from "@controllers/createTopicController";
+import { createTopic } from "@controllers/createTopicController";
+import { filterPublishableUrls } from "@services/topicMaterials";
 import { Publishers } from "@services/rabbitmq/index";
 
 function createMockReq(body: unknown): Request {

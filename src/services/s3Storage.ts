@@ -3,6 +3,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { s3Client, S3_BUCKET_NAME, useSeaweedFS } from "@config/s3.js";
 import { ALLOWED_CONTENT_TYPES, MAX_FILE_SIZE } from "@config/fileConstants.js";
 import { logger } from "@config/logger.js";
+import { buildUploadKey } from "@services/uploadKey.js";
 
 const log = logger.child({ module: "s3Storage" });
 
@@ -124,7 +125,7 @@ export async function generatePresignedUploadUrl(userId: string, topicId: string
     throw new S3StorageError(S3ErrorCode.INVALID_PATH, `File size ${fileSize} exceeds maximum allowed size of ${MAX_FILE_SIZE} bytes`);
   }
 
-  const s3Path = `${userId}/${topicId}/files/${fileName}`;
+  const s3Path = buildUploadKey(userId, topicId, fileName);
   validateS3Path(s3Path);
 
   try {

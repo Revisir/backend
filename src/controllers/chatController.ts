@@ -5,7 +5,8 @@ import { buildChatContext, assessStudentPerformance } from "@services/chatContex
 import { generateQuestions, evaluateAnswer } from "@services/questionAgent.js";
 import { ErrorResponse } from "$types/common.types.js";
 import { startChatSessionSchema, sendChatMessageSchema, completeChatSessionSchema } from "@/schemas/index.js";
-import { recordRevision } from "@controllers/topicController.js";
+import { recordRevision, AlreadyReviewedTodayError } from "@services/reviewRecorder.js";
+import { getLearnerDay, isReviewedToday } from "@services/learnerDay.js";
 import { logger } from "@config/logger.js";
 
 const log = logger.child({ module: "chatController" });
@@ -50,6 +51,7 @@ export async function startChatSession(req: Request, res: Response): Promise<voi
       res.status(404).json({
         error: { code: "CONTENT_NOT_FOUND", message: "Topic doesnt have any material" },
       } as ErrorResponse);
+      return;
     }
 
     // Agent pipeline: extract → review
@@ -176,7 +178,12 @@ export async function sendChatMessage(req: Request, res: Response): Promise<void
 
 /**
  * POST /api/chat/complete
- * Complete revision session and update schedule
+ * Complete revision session and update schedule.
+ *
+ * Idempotent per session: a session that already completed returns its stored
+ * result, and one that recorded its review without storing the result returns
+ * that review. A topic already reviewed today by another session or path
+ * returns ALREADY_REVIEWED_TODAY without spending an LLM call.
  */
 export async function completeChatSession(req: Request, res: Response): Promise<void> {
   try {
@@ -199,6 +206,19 @@ export async function completeChatSession(req: Request, res: Response): Promise<
       return;
     }
 
+    if (chatSession.result) {
+      res.status(200).json(toCompleteResponse(chatSession.result));
+      return;
+    }
+
+    if (chatSession.completedAt) {
+      // Completed before results were stored on the session; nothing to replay.
+      res.status(400).json({
+        error: { code: "SESSION_INVALID", message: "Chat session is already complete" },
+      } as ErrorResponse);
+      return;
+    }
+
     if (!topic) {
       res.status(404).json({
         error: { code: "TOPIC_NOT_FOUND", message: "Topic not found or access denied" },
@@ -206,23 +226,39 @@ export async function completeChatSession(req: Request, res: Response): Promise<
       return;
     }
 
-    // LLM evaluates session quality from conversation history
-    const llmQuality = await assessStudentPerformance(chatSession.messages);
+    const day = getLearnerDay(req);
+    // This session recorded today's review but its result never reached the
+    // session (a crash, or a concurrent completion still saving): replay it.
+    const reviewedToday = isReviewedToday(topic, day);
+    const replaying = reviewedToday && String(topic.lastReviewSessionId) === String(chatSession._id);
+    if (reviewedToday && !replaying) {
+      sendAlreadyReviewed(res);
+      return;
+    }
+
+    // LLM evaluates session quality from conversation history; a replay returns the recorded score.
+    const llmQuality = replaying ? null : await assessStudentPerformance(chatSession.messages);
 
     log.info({ userId: req.userId!, topicId: topic._id, userQuality, llmQuality }, "Recording revision");
 
-    const result = await recordRevision({ userId: req.userId!, topic, userQuality, llmQuality });
+    let result: { nextRevisionDate: Date; finalQuality: number };
+    try {
+      // When this session already holds the day, this returns the review it recorded.
+      result = await recordRevision({ userId: req.userId!, topicId: topic._id, userQuality, llmQuality, method: "ai_quiz", sessionId: chatSession._id, day });
+    } catch (err) {
+      if (!(err instanceof AlreadyReviewedTodayError)) throw err;
+      sendAlreadyReviewed(res);
+      return;
+    }
 
     log.info({ result }, "Revision recorded");
 
     chatSession.completedAt = new Date();
     chatSession.active = false;
+    chatSession.result = { nextRevisionDate: result.nextRevisionDate, finalQuality: result.finalQuality };
     await chatSession.save();
 
-    res.status(200).json({
-      nextRevisionDate: result.nextRevisionDate.toISOString(),
-      finalQuality: result.finalQuality,
-    });
+    res.status(200).json(toCompleteResponse(chatSession.result));
   } catch (error) {
     log.error({ err: error }, "Error completing chat session");
 
@@ -230,4 +266,13 @@ export async function completeChatSession(req: Request, res: Response): Promise<
       error: { code: "INTERNAL_SERVER_ERROR", message: "Failed to complete chat session", details: error instanceof Error ? error.message : "Unknown error" },
     } as ErrorResponse);
   }
+}
+
+function toCompleteResponse(result: { nextRevisionDate: Date; finalQuality: number }) {
+  return { nextRevisionDate: new Date(result.nextRevisionDate).toISOString(), finalQuality: result.finalQuality };
+}
+
+/** The topic's learner-day is held by another review. */
+function sendAlreadyReviewed(res: Response): void {
+  res.status(409).json({ error: { code: "ALREADY_REVIEWED_TODAY", message: "This topic has already been reviewed today" } } as ErrorResponse);
 }

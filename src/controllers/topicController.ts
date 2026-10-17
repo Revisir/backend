@@ -2,31 +2,19 @@ import { Request, Response } from "express";
 import { Topic } from "@models/Topic.js";
 import { RevisionRecord } from "@models/RevisionRecord.js";
 import { generateMindMap } from "@services/mindMapGenerator.js";
-import { calculateNextReview } from "@services/sm2Algorithm.js";
 import { generatePresignedUploadUrl, deleteTopicFiles, deleteFile, deleteByPath, getSignedContentUrl } from "@services/s3Storage.js";
+import { recordRevision, AlreadyReviewedTodayError, TopicNotFoundError } from "@services/reviewRecorder.js";
+import { getLearnerDay, changedStudyDate } from "@services/learnerDay.js";
+import { withReviewState, reviewContextFor } from "@services/reviewAvailability.js";
+import { retentionAt } from "@services/sm2Algorithm.js";
 import { GetTopicsResponse } from "$types/topic.types.js";
 import { ErrorResponse } from "$types/common.types.js";
-import { getTopicsQuerySchema, topicIdParamSchema, topicFileParamSchema } from "@/schemas/index.js";
-import { Publishers } from "@services/rabbitmq/index.js";
-import { filterPublishableUrls } from "@controllers/createTopicController.js";
+import { getTopicsQuerySchema, topicIdParamSchema, topicFileParamSchema, markRevisedSchema, updateTopicSchema } from "@/schemas/index.js";
+import { applyUrlListUpdate, upsertPendingFileEntries, afterAttachmentRemoved, filterPublishableUrls } from "@services/topicMaterials.js";
 import { z } from "zod";
-import { DateTime } from "luxon";
 import { logger } from "@config/logger.js";
 
 const log = logger.child({ module: "topicController" });
-
-const markRevisedSchema = z.object({
-  userQuality: z.number().min(1).max(5),
-  llmQuality: z.number().min(1).max(5).optional(),
-});
-
-const updateTopicSchema = z.object({
-  topicName: z.string().max(200).optional(),
-  subjectName: z.string().max(100).optional(),
-  description: z.string().optional(),
-  urls: z.array(z.string().url()).optional(),
-  dateStudied: z.string().datetime().optional(),
-});
 
 import { ALLOWED_CONTENT_TYPES, MAX_FILE_SIZE, MAX_FILES_PER_UPLOAD, MAX_FILES_PER_TOPIC } from "@/config/fileConstants.js";
 
@@ -130,10 +118,13 @@ export async function getTopicById(req: Request, res: Response): Promise<void> {
         fileName: file.fileName,
         fileType: file.fileType,
         fileUrl: await getSignedContentUrl(file.s3Path),
+        ...statusFields(file),
       })),
     );
+    const urls = (topic.urls || []).map(({ errorReason, ...url }) => ({ ...url, ...statusFields({ processingStatus: url.processingStatus, errorReason }) }));
 
-    res.status(200).json({ ...topic, files });
+    // Review fields come from the stored attachments, before files and URLs are reshaped.
+    res.status(200).json({ ...withReviewState(topic, reviewContextFor(req)), files, urls });
   } catch (error) {
     log.error({ err: error }, "Error fetching topic by ID");
 
@@ -153,19 +144,19 @@ export async function getTopicById(req: Request, res: Response): Promise<void> {
  */
 export async function getDueTopics(req: Request, res: Response): Promise<void> {
   try {
-    const timeZone = req.headers["X-Local-TimeZone"]?.[0] ?? "Asia/Calcutta";
-    const currentDate = DateTime.now().setZone(timeZone);
-    const tomorrowDayStart = currentDate.plus({ day: 1 }).startOf("day");
-    const todayDayStart = currentDate.startOf("day");
-    const todayDayend = currentDate.endOf("day");
+    const ctx = reviewContextFor(req);
+    const { day } = ctx;
+    // Due today in the learner's zone, plus anything already finished today so
+    // the queue can keep showing it as done for the rest of the day (R12).
+    // Bank questions and the retired list are select: false and stay out.
     const dueTopics = await Topic.find({
       userId: req.userId,
-      $or: [{ revisionDate: { $lte: tomorrowDayStart } }, { lastRevised: { $lte: todayDayend, $gte: todayDayStart } }],
-    } as any)
+      $or: [{ revisionDate: { $lt: day.tomorrowStart } }, { lastRevised: { $gte: day.start, $lt: day.tomorrowStart } }],
+    })
       .sort({ revisionDate: 1 })
       .lean();
 
-    res.status(200).json({ topics: dueTopics });
+    res.status(200).json({ topics: dueTopics.map((topic) => withReviewState(topic, ctx)) });
   } catch (error) {
     log.error({ err: error }, "Error fetching due topics");
 
@@ -218,11 +209,9 @@ export async function getForgettingCurve(req: Request, res: Response): Promise<v
       .lean();
 
     // Build curve segments: each revision resets retention to 100%
-    // Between revisions, retention decays exponentially: R(t) = e^(-t/S)
-    // Stability S is derived from the interval (days where R drops to ~0.9 threshold from SM-2)
-    // We use S = -interval / ln(0.9) ≈ interval * 9.49 (assuming SM-2 targets 90% at interval boundary)
-    const RETENTION_THRESHOLD = 0.9;
-    const stabilityFactor = -1 / Math.log(RETENTION_THRESHOLD); // ≈ 9.49
+    // Between revisions, retention decays exponentially: R(t) = e^(-t/S), with
+    // S = interval / -ln(0.9) so retention is 0.9 when a review falls due.
+    // `retentionAt` is the same model the recall estimate uses (KTD12).
 
     interface CurvePoint {
       date: string;
@@ -243,14 +232,13 @@ export async function getForgettingCurve(req: Request, res: Response): Promise<v
 
     if (history.length === 0) {
       // No revisions yet — show decay from dateStudied to now (or revisionDate, whichever is later)
-      const stability = topic.interval * stabilityFactor;
       const endDate = new Date(Math.max(Date.now(), topic.revisionDate.getTime()));
       const totalDays = Math.ceil((endDate.getTime() - anchorDate.getTime()) / 86400000);
       const step = Math.max(1, Math.floor(totalDays / 60)); // cap at ~60 points
 
       for (let d = 0; d <= totalDays; d += step) {
         const pointDate = new Date(anchorDate.getTime() + d * 86400000);
-        const retention = Math.exp(-d / stability);
+        const retention = retentionAt(d, topic.interval);
         curvePoints.push({
           date: pointDate.toISOString().split("T")[0],
           retention: Math.round(retention * 1000) / 1000,
@@ -264,13 +252,12 @@ export async function getForgettingCurve(req: Request, res: Response): Promise<v
       for (let i = 0; i < history.length; i++) {
         const record = history[i];
         const revDate = new Date(record.revisionDate);
-        const stability = currentInterval * stabilityFactor;
         const segmentDays = Math.ceil((revDate.getTime() - segmentStart.getTime()) / 86400000);
         const step = Math.max(1, Math.floor(segmentDays / 30));
 
         for (let d = 0; d < segmentDays; d += step) {
           const pointDate = new Date(segmentStart.getTime() + d * 86400000);
-          const retention = Math.exp(-d / stability);
+          const retention = retentionAt(d, currentInterval);
           curvePoints.push({
             date: pointDate.toISOString().split("T")[0],
             retention: Math.round(retention * 1000) / 1000,
@@ -297,14 +284,13 @@ export async function getForgettingCurve(req: Request, res: Response): Promise<v
       // Final segment: from last revision to now or next revision date
       const lastRevision = history[history.length - 1];
       const lastRevDate = new Date(lastRevision.revisionDate);
-      const stability = lastRevision.newInterval * stabilityFactor;
       const endDate = new Date(Math.max(Date.now(), topic.revisionDate.getTime()));
       const finalDays = Math.ceil((endDate.getTime() - lastRevDate.getTime()) / 86400000);
       const step = Math.max(1, Math.floor(finalDays / 30));
 
       for (let d = 1; d <= finalDays; d += step) {
         const pointDate = new Date(lastRevDate.getTime() + d * 86400000);
-        const retention = Math.exp(-d / stability);
+        const retention = retentionAt(d, lastRevision.newInterval);
         curvePoints.push({
           date: pointDate.toISOString().split("T")[0],
           retention: Math.round(retention * 1000) / 1000,
@@ -365,7 +351,10 @@ export async function getTopicHistory(req: Request, res: Response): Promise<void
       return;
     }
 
-    const history = await RevisionRecord.find({ topicId: id, userId: req.userId }).sort({ revisionDate: -1 }).lean();
+    const records = await RevisionRecord.find({ topicId: id, userId: req.userId }).sort({ revisionDate: -1 }).lean();
+    // Records written before `method` existed were all self-reported or AI-chat
+    // reviews with no way to tell them apart; they read as `self`.
+    const history = records.map((record) => ({ ...record, method: record.method ?? "self" }));
 
     res.status(200).json({ history });
   } catch (error) {
@@ -540,48 +529,9 @@ export async function getTopicMindMap(req: Request, res: Response): Promise<void
 }
 
 /**
- * Shared logic: calculate SM-2, create revision record, update topic.
- */
-export async function recordRevision({ userId, topic, userQuality, llmQuality }: { userId: string; topic: any; userQuality: number; llmQuality?: number }) {
-  const today = DateTime.now().toUTC();
-  const todayJs = today.toJSDate();
-
-  const finalQuality = llmQuality ? (userQuality + llmQuality) / 2 : userQuality;
-
-  const lastRecord = await RevisionRecord.findOne({ topicId: topic._id, userId }).sort({ revisionDate: -1 });
-
-  const result = calculateNextReview({
-    eFactor: lastRecord?.newEFactor ?? topic.eFactor,
-    repetitionNumber: topic.repetitionNumber,
-    interval: lastRecord?.newInterval ?? topic.interval,
-    quality: finalQuality,
-  });
-
-  await RevisionRecord.create({
-    userId,
-    topicId: topic._id,
-    revisionDate: todayJs,
-    userQuality,
-    llmQuality: llmQuality ?? userQuality,
-    finalQuality,
-    newEFactor: result.eFactor,
-    newInterval: result.interval,
-    nextRevisionDate: result.nextRevisionDate,
-  });
-
-  topic.eFactor = result.eFactor;
-  topic.interval = result.interval;
-  topic.revisionDate = result.nextRevisionDate;
-  topic.repetitionNumber = result.repetitionNumber;
-  topic.lastRevised = todayJs;
-  await topic.save();
-
-  return { nextRevisionDate: result.nextRevisionDate, finalQuality, lastRevised: todayJs };
-}
-
-/**
  * POST /api/topics/:id/revised
- * Mark topic as revised/unrevised and create revision record
+ * Done on the topic page: record the learner's own 0–5 rating.
+ * A topic takes one review per learner-day; there is no same-day undo.
  */
 export async function markTopicRevised(req: Request, res: Response): Promise<void> {
   try {
@@ -608,62 +558,27 @@ export async function markTopicRevised(req: Request, res: Response): Promise<voi
     }
 
     const { id } = paramValidation.data;
-    const { userQuality, llmQuality } = bodyValidation.data;
+    const { userQuality } = bodyValidation.data;
 
-    const topic = await Topic.findOne({ _id: id, userId: req.userId });
-    if (!topic) {
-      res.status(404).json({
-        error: {
-          code: "TOPIC_NOT_FOUND",
-          message: "Topic not found or access denied",
-        },
-      } as ErrorResponse);
-      return;
-    }
-
-    const today = DateTime.now().toUTC();
-    const todayDayStart = today.startOf("day").toJSDate();
-    const todayDayEnd = today.endOf("day").toJSDate();
-
-    const todayRecord = await RevisionRecord.findOne({
-      topicId: id,
-      userId: req.userId,
-      revisionDate: { $gte: todayDayStart, $lt: todayDayEnd },
-    });
-
-    if (todayRecord) {
-      await RevisionRecord.deleteOne({ _id: todayRecord._id });
-
-      const prevRecord = await RevisionRecord.findOne({ topicId: id, userId: req.userId }).sort({ revisionDate: -1 });
-
-      if (prevRecord) {
-        topic.eFactor = prevRecord.newEFactor;
-        topic.interval = prevRecord.newInterval;
-        topic.revisionDate = prevRecord.nextRevisionDate;
-        topic.repetitionNumber = Math.max(0, topic.repetitionNumber - 1);
-        topic.lastRevised = prevRecord.revisionDate;
-      } else {
-        topic.eFactor = 2.5;
-        topic.interval = 1;
-        topic.revisionDate = topic.dateStudied;
-        topic.repetitionNumber = 0;
-        topic.lastRevised = null;
-      }
-
-      await topic.save();
-
-      res.status(200).json({ success: true, unrevised: true, nextRevisionDate: topic.revisionDate, lastRevised: topic.lastRevised });
-      return;
-    }
-
-    const result = await recordRevision({ userId: req.userId!, topic, userQuality, llmQuality });
+    const result = await recordRevision({ userId: req.userId!, topicId: id, userQuality, method: "self", day: getLearnerDay(req) });
 
     res.status(200).json({
       success: true,
       nextRevisionDate: result.nextRevisionDate.toISOString(),
-      lastRevised: result.lastRevised,
+      lastRevised: result.lastRevised.toISOString(),
+      eFactor: result.eFactor,
+      interval: result.interval,
+      repetitionNumber: result.repetitionNumber,
+      lastQuality: result.lastQuality,
     });
   } catch (error) {
+    if (error instanceof TopicNotFoundError || error instanceof AlreadyReviewedTodayError) {
+      res.status(error instanceof TopicNotFoundError ? 404 : 409).json({
+        error: { code: error.code, message: error.message },
+      } as ErrorResponse);
+      return;
+    }
+
     log.error({ err: error }, "Error marking topic as revised");
 
     res.status(500).json({
@@ -707,7 +622,14 @@ export async function updateTopic(req: Request, res: Response): Promise<void> {
     const { id } = paramValidation.data;
     const updates = bodyValidation.data;
 
-    const topic = await Topic.findOne({ _id: id, userId: req.userId });
+    let topic = await Topic.findOne({ _id: id, userId: req.userId });
+    if (topic && updates.urls !== undefined) {
+      // Atomic array updates, so existing entries keep their status and paths (R41)
+      // and a concurrent worker write is never lost. They leave the loaded
+      // document stale, so continue from the stored topic.
+      await applyUrlListUpdate(topic, updates.urls);
+      topic = await Topic.findOne({ _id: id, userId: req.userId });
+    }
     if (!topic) {
       res.status(404).json({
         error: {
@@ -718,48 +640,30 @@ export async function updateTopic(req: Request, res: Response): Promise<void> {
       return;
     }
 
+    const day = getLearnerDay(req);
+
     if (updates.topicName) topic.topicName = updates.topicName.trim();
     if (updates.subjectName) topic.subjectName = updates.subjectName.trim();
     if (updates.description !== undefined) topic.description = updates.description.trim();
-    if (updates.urls !== undefined) {
-      const existingUrls = topic.urls.map((u) => u.url);
-      const newUrls = updates.urls.filter((u) => !existingUrls.includes(u));
-      const removedUrls = topic.urls.filter((u) => !updates.urls!.includes(u.url));
-
-      // Delete extracted files for removed URLs
-      for (const removed of removedUrls) {
-        if (removed.extractedContentPath) {
-          await deleteByPath(removed.extractedContentPath);
-        }
-      }
-
-      topic.urls = updates.urls.map((url) => ({ url })) as any;
-      const processableUrls = filterPublishableUrls(newUrls);
-      if (processableUrls.length && Publishers.url) {
-        try {
-          await Publishers.url.publish({
-            message: { topicId: id, userId: req.userId!, urls: processableUrls },
-          });
-        } catch (err) {
-          log.error({ err, topicId: id, urls: processableUrls }, "Failed to publish URL processing message");
-        }
-      }
-    }
 
     // Clear mindmap if no materials remain
     const hasFiles = topic.files.length > 0;
-    const hasHttpUrls = topic.urls.some((u) => u.url.startsWith("http://") || u.url.startsWith("https://"));
+    const hasHttpUrls = filterPublishableUrls(topic.urls.map((u) => u.url)).length > 0;
     if (!hasFiles && !hasHttpUrls) {
       topic.mindMap = null;
       topic.mindMapGeneratedAt = null;
     }
 
-    if (updates.dateStudied) {
-      topic.dateStudied = new Date(updates.dateStudied);
+    // Only a changed study date resets the schedule and history (R42, KTD20).
+    const newStudyDate = updates.dateStudied ? changedStudyDate(updates.dateStudied, topic.dateStudied, day) : null;
+    if (newStudyDate) {
+      topic.dateStudied = newStudyDate;
       topic.eFactor = 2.5;
       topic.interval = 1;
       topic.repetitionNumber = 0;
-      topic.revisionDate = new Date(updates.dateStudied);
+      topic.revisionDate = newStudyDate;
+      topic.lastRevised = null;
+      topic.lastQuality = null;
       await RevisionRecord.deleteMany({ topicId: id, userId: req.userId });
     }
 
@@ -823,17 +727,21 @@ export async function deleteTopicFile(req: Request, res: Response): Promise<void
     await deleteFile(req.userId!, id, file.fileName);
     if (file.extractedContentUrl) await deleteByPath(file.extractedContentUrl);
 
+    const removed = { processingStatus: file.processingStatus };
     file.deleteOne();
 
     // Clear mindmap if no materials remain after file deletion
     const hasRemainingFiles = topic.files.length > 0;
-    const hasHttpUrls = topic.urls.some((u) => u.url.startsWith("http://") || u.url.startsWith("https://"));
+    const hasHttpUrls = filterPublishableUrls(topic.urls.map((u) => u.url)).length > 0;
     if (!hasRemainingFiles && !hasHttpUrls) {
       topic.mindMap = null;
       topic.mindMapGeneratedAt = null;
     }
 
     await topic.save();
+
+    // Rebuild the question bank from what remains, or clear it (R17).
+    await afterAttachmentRemoved(id, req.userId!, [removed]);
 
     res.status(200).json({ success: true });
   } catch (error) {
@@ -908,6 +816,9 @@ export async function uploadTopicFiles(req: Request, res: Response): Promise<voi
       })),
     );
 
+    // A pending entry per file, so it shows on the topic page while it uploads and extracts.
+    await upsertPendingFileEntries(id, req.userId!, files);
+
     res.status(200).json({ uploadUrls });
   } catch (error) {
     log.error({ err: error }, "Error generating upload URLs");
@@ -957,6 +868,7 @@ export async function resetTopicProgress(req: Request, res: Response): Promise<v
     topic.repetitionNumber = 0;
     topic.revisionDate = topic.dateStudied;
     topic.lastRevised = null;
+    topic.lastQuality = null;
     await topic.save();
 
     await RevisionRecord.deleteMany({ topicId: id, userId: req.userId });
@@ -1019,4 +931,12 @@ export async function deleteTopic(req: Request, res: Response): Promise<void> {
       },
     } as ErrorResponse);
   }
+}
+
+/**
+ * The status an attachment shows on the topic page, with its reason when it failed.
+ */
+function statusFields(att: { processingStatus?: string | null; errorReason?: string | null }) {
+  const processingStatus = att.processingStatus ?? "pending";
+  return processingStatus === "failed" ? { processingStatus, errorReason: att.errorReason ?? "Extraction failed" } : { processingStatus };
 }

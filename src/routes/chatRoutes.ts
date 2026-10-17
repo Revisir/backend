@@ -38,18 +38,21 @@ router.post('/message', sendChatMessage);
 
 /**
  * POST /api/chat/complete
- * Complete revision session and update schedule
- * 
+ * Complete revision session and update schedule. The LLM scores the transcript
+ * server-side; finalQuality is the mean of userQuality and that score, recorded
+ * once as an "ai_quiz" review. Idempotent per session: completing an already
+ * completed session returns its stored result.
+ *
  * Request body:
  * - sessionId: string (MongoDB ObjectId)
  * - topicId: string (MongoDB ObjectId)
  * - userQuality: number (0-5)
- * - llmQuality: number (0-5)
- * 
+ *
  * Response:
  * - 200: { nextRevisionDate: string (ISO), finalQuality: number }
- * - 400: Validation error
+ * - 400: Validation error, or SESSION_INVALID for a session completed before results were stored
  * - 404: Session or topic not found
+ * - 409: ALREADY_REVIEWED_TODAY (the topic was reviewed another way today)
  * - 500: Server error
  */
 router.post('/complete', completeChatSession);

@@ -1,6 +1,6 @@
 import { ITopic } from "@models/Topic.js";
-import { getAllExtractedContent } from "./s3Storage.js";
-import { getLLMClient } from "./llmClient.js";
+import { getAllExtractedContent } from "@services/s3Storage.js";
+import { getLLMClient } from "@services/llmClient.js";
 import { PROMPTS } from "@config/prompts.js";
 import { logger } from "@config/logger.js";
 

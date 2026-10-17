@@ -5,6 +5,7 @@ import mongoose from "mongoose";
 import { Topic } from "@models/Topic.js";
 import { truncateErrorReason } from "@models/Topic.js";
 import { saveExtractedContentAtPath } from "@services/s3Storage.js";
+import { extractedFileNameForUrl } from "@services/uploadKey.js";
 import { PROMPTS } from "@config/prompts.js";
 import { logger } from "@config/logger.js";
 import { tavily } from "@tavily/core";
@@ -16,6 +17,8 @@ import { QueuePublisher } from "@services/rabbitmq/publisher.js";
 import { QueueConsumer, type MessageOutcome } from "@services/rabbitmq/consumer.js";
 import { RABBITMQ_CONFIG, RABBITMQ_URL } from "@config/rabbitmq.js";
 import { urlProcessingMessageSchema } from "@/schemas/queue.schema.js";
+import { Publishers, initQuestionBankPublisher } from "@services/rabbitmq/index.js";
+import { bestEffort, onAttachmentSettled } from "@services/questionBankJobs.js";
 import type { ConsumeMessage } from "amqplib";
 
 const log = logger.child({ module: "urlProcessor" });
@@ -29,7 +32,7 @@ export interface UrlProcessorEvent {
 let isConnected = false;
 
 async function connectDB() {
-  if (isConnected) return;
+  if (isConnected || mongoose.connection.readyState === 1) return;
   await mongoose.connect(process.env.MONGODB_URI!);
   isConnected = true;
 }
@@ -87,8 +90,7 @@ async function processUrl(topicId: string, userId: string, url: string) {
   const content = await extractUrl(url);
   if (!content) return;
 
-  const sanitizedName = url.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 100);
-  const extractedPath = await saveExtractedContentAtPath(userId, topicId, `url_${sanitizedName}.md`, content);
+  const extractedPath = await saveExtractedContentAtPath(userId, topicId, extractedFileNameForUrl(url), content);
 
   await Topic.updateOne(
     { _id: topicId, userId, "urls.url": url },
@@ -130,7 +132,7 @@ export function isTransientError(err: unknown): boolean {
  * - Updates status to "completed" or "failed" per URL
  * - Classifies errors: transient → nack_requeue, permanent → nack_reject
  */
-async function handleUrlMessage(msg: ConsumeMessage): Promise<MessageOutcome> {
+export async function handleUrlMessage(msg: ConsumeMessage): Promise<MessageOutcome> {
   const parsed = JSON.parse(msg.content.toString());
   const { topicId, userId, urls } = parsed;
 
@@ -139,7 +141,7 @@ async function handleUrlMessage(msg: ConsumeMessage): Promise<MessageOutcome> {
   // Update all URL statuses to "processing"
   await Topic.updateMany(
     { _id: topicId, userId },
-    { $set: { "urls.$[elem].processingStatus": "processing" } },
+    { $set: { "urls.$[elem].processingStatus": "processing", "urls.$[elem].statusUpdatedAt": new Date() } },
     { arrayFilters: [{ "elem.url": { $in: urls } }] },
   );
 
@@ -156,13 +158,7 @@ async function handleUrlMessage(msg: ConsumeMessage): Promise<MessageOutcome> {
       const content = await extractUrl(url);
 
       if (content) {
-        const sanitizedName = url.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 100);
-        const extractedPath = await saveExtractedContentAtPath(
-          userId,
-          topicId,
-          `url_${sanitizedName}.md`,
-          content,
-        );
+        const extractedPath = await saveExtractedContentAtPath(userId, topicId, extractedFileNameForUrl(url), content);
 
         await Topic.updateOne(
           { _id: topicId, userId, "urls.url": url },
@@ -171,6 +167,8 @@ async function handleUrlMessage(msg: ConsumeMessage): Promise<MessageOutcome> {
               "urls.$.extractedContentPath": extractedPath,
               "urls.$.processedAt": new Date(),
               "urls.$.processingStatus": "completed",
+              "urls.$.statusUpdatedAt": new Date(),
+              "urls.$.errorReason": null,
             },
           },
         );
@@ -184,6 +182,7 @@ async function handleUrlMessage(msg: ConsumeMessage): Promise<MessageOutcome> {
           {
             $set: {
               "urls.$.processingStatus": "failed",
+              "urls.$.statusUpdatedAt": new Date(),
               "urls.$.errorReason": truncateErrorReason("Extraction returned no content"),
             },
           },
@@ -205,6 +204,7 @@ async function handleUrlMessage(msg: ConsumeMessage): Promise<MessageOutcome> {
         {
           $set: {
             "urls.$.processingStatus": "failed",
+            "urls.$.statusUpdatedAt": new Date(),
             "urls.$.errorReason": truncateErrorReason(errorMsg),
           },
         },
@@ -212,6 +212,9 @@ async function handleUrlMessage(msg: ConsumeMessage): Promise<MessageOutcome> {
       log.error({ url, err }, "URL extraction failed permanently");
     }
   }
+
+  // Every URL in the message has settled; build the bank if the whole topic has.
+  await bestEffort("attachment_settled", topicId, () => onAttachmentSettled(topicId, userId));
 
   // If all URLs failed with permanent errors, reject the message
   if (allFailed) {
@@ -237,6 +240,9 @@ export async function startUrlConsumer(): Promise<void> {
     routingKey: RABBITMQ_CONFIG.URL_PROCESSING_ROUTING_KEY,
     dlqName: RABBITMQ_CONFIG.URL_PROCESSING_DLQ,
   }).init();
+
+  // Publishes bank builds when a topic's attachments settle; the file-processor builds them.
+  Publishers.questionBank = await initQuestionBankPublisher();
 
   const consumer = new QueueConsumer(connectionManager);
   await consumer.consume(RABBITMQ_CONFIG.URL_PROCESSING_QUEUE, handleUrlMessage, {
